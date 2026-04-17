@@ -90,6 +90,12 @@ const NO_RESULTS_ACTION_OPTIONS: Record<Language, [string, string]> = {
     hi: ['एजेंट से बात करें (Talk to the agent)', 'उपलब्ध विकल्प देखें (See available options)'],
 }
 
+const RESTART_SESSION_PROMPTS: Record<Language, string> = {
+    en: 'This session is complete. Please start a new session by clicking the "+" button at the top.',
+    te: 'ఈ సెషన్ పూర్తైంది. పై భాగంలో ఉన్న "+" బటన్‌పై క్లిక్ చేసి కొత్త సెషన్ ప్రారంభించండి.',
+    hi: 'यह सत्र पूरा हो चुका है। कृपया ऊपर दिए गए "+" बटन पर क्लिक करके नया सत्र शुरू करें।',
+}
+
 export function normalizeLanguage(language?: string | null): Language {
     if (language === 'te' || language === 'hi' || language === 'en') {
         return language
@@ -111,6 +117,11 @@ export function getShowResultsCta(language?: string | null): string {
 export function getShowResultsActionOptions(language?: string | null): [string, string] {
     const normalizedLanguage = normalizeLanguage(language)
     return SHOW_RESULTS_ACTION_OPTIONS[normalizedLanguage] ?? SHOW_RESULTS_ACTION_OPTIONS[DEFAULT_LANGUAGE]
+}
+
+export function getRestartSessionPrompt(language?: string | null): string {
+    const normalizedLanguage = normalizeLanguage(language)
+    return RESTART_SESSION_PROMPTS[normalizedLanguage] ?? RESTART_SESSION_PROMPTS[DEFAULT_LANGUAGE]
 }
 
 export function getNoResultsActionPrompt(language?: string | null, location?: string | null): string {

@@ -187,3 +187,47 @@ npm run build
 - The source of truth for conversation progress is the `conversations` record in Supabase.
 - Use the generated types in `types/supabase.ts` instead of hand-writing table shapes.
 - Keep chat changes aligned with the step machine in `types/chat.ts` and `lib/chatService.ts`.
+
+## 15. Embeddable Widget
+
+You can embed the chatbot on any external website using a script tag.
+
+```html
+<script>
+	window.ChatWidgetConfig = {
+		agentId: 'agent_123',
+		themeColor: '#1e293b',
+		buttonText: 'Chat',
+		onOpen: function (detail) {
+			console.log('Widget opened', detail.sessionId)
+		},
+		onClose: function (detail) {
+			console.log('Widget closed', detail.sessionId)
+		}
+	}
+</script>
+<script src="https://ai-lead-capture-two.vercel.app/widget.js" async></script>
+```
+
+Widget runtime details:
+
+- Script file: `public/widget.js`
+- Iframe route: `/embed`
+- Session persistence key: `chat_session_id`
+- Open state persistence key: `chat_widget_open`
+
+Supported global config options (`window.ChatWidgetConfig`):
+
+- `agentId` (string): Optional agent identifier appended to iframe query params.
+- `themeColor` (string): Launcher button color (default `#111827`).
+- `buttonText` (string): Launcher label text (default `Chat`).
+- `baseUrl` (string): Override widget host origin if needed.
+- `onOpen` (function): Called when widget is opened by user interaction.
+- `onClose` (function): Called when widget is closed by user interaction.
+
+`onOpen` and `onClose` receive a `detail` object:
+
+- `sessionId`: current widget session id.
+- `agentId`: configured agent id or `null`.
+- `isOpen`: latest open state.
+- `root`, `panel`, `button`, `iframe`: DOM element references for advanced integrations.

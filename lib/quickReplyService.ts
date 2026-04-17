@@ -8,6 +8,24 @@ const WIDE_BUDGET_INPUT = '2000000 to 12000000'
 
 type SupportedLanguage = Language
 
+const LOCATION_LABELS: Record<SupportedLanguage, Record<string, string>> = {
+    en: {},
+    te: {
+        gajuwaka: 'గాజువాక',
+        madhurawada: 'మధురవాడ',
+        rushikonda: 'రుషికొండ',
+        anandapuram: 'ఆనందపురం',
+        visakhapatnam: 'విశాఖపట్నం',
+    },
+    hi: {
+        gajuwaka: 'गाजुवाका',
+        madhurawada: 'मधुरवाडा',
+        rushikonda: 'रुशिकोंडा',
+        anandapuram: 'आनंदपुरम',
+        visakhapatnam: 'विशाखापट्टनम',
+    },
+}
+
 const TRANSLATIONS: Record<SupportedLanguage, {
     other: string
     notSure: string
@@ -204,6 +222,18 @@ function localizePropertyType(value: string, language: SupportedLanguage): strin
     return TRANSLATIONS[language].propertyTypes[normalized] ?? fallback
 }
 
+function localizeLocationLabel(label: string, value: string, language: SupportedLanguage): string {
+    if (language === 'en') {
+        return label
+    }
+
+    const map = LOCATION_LABELS[language]
+    const valueKey = value.trim().toLowerCase()
+    const labelKey = label.trim().toLowerCase()
+
+    return map[valueKey] ?? map[labelKey] ?? label
+}
+
 function getLanguageOptions(): QuickReplyOption[] {
     return [
         { label: 'English', value: 'English' },
@@ -224,7 +254,7 @@ function getIntentOptions(language: SupportedLanguage): QuickReplyOption[] {
 async function getLocationOptions(language: SupportedLanguage): Promise<QuickReplyOption[]> {
     const dynamic = await getTopLocations(DYNAMIC_LIMIT)
     const options = dynamic.map((entry) => ({
-        label: entry.label,
+        label: localizeLocationLabel(entry.label, entry.value, language),
         value: entry.value,
     }))
 

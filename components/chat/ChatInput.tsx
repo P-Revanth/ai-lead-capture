@@ -32,7 +32,7 @@ export default function ChatInput({ loading, onSend }: ChatInputProps) {
             <label htmlFor="chat-message" className="sr-only">
                 Message Sarah
             </label>
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-500" aria-hidden="true">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-500" aria-hidden="true">
                 <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M4 20V10l8-6 8 6v10" />
                     <path d="M9 20v-6h6v6" />
@@ -43,7 +43,7 @@ export default function ChatInput({ loading, onSend }: ChatInputProps) {
                 value={value}
                 onChange={(event) => setValue(event.target.value)}
                 placeholder="Ask about area, budget, or property type"
-                className="h-11 min-w-0 flex-1 rounded-xl capitalize border border-transparent bg-transparent px-2 text-[15px] text-zinc-900 outline-none placeholder:text-zinc-400 transition focus:bg-transparent"
+                className="h-11 min-w-0 flex-1 rounded-xl border border-transparent bg-transparent px-2 text-[15px] text-zinc-900 outline-none placeholder:text-zinc-400 transition focus:bg-transparent"
                 autoComplete="off"
                 disabled={loading}
             />

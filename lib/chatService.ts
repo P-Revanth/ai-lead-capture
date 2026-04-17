@@ -24,7 +24,7 @@ import {
     RESPONSE_PROMPT_VERSION,
     ExtractionResult,
 } from '@/lib/llmService'
-import { getNoResultsActionPrompt, getPrompt, getResultsSummaryPrompt, normalizeLanguage } from '@/lib/prompts'
+import { getNoResultsActionPrompt, getPrompt, getRestartSessionPrompt, getResultsSummaryPrompt, normalizeLanguage } from '@/lib/prompts'
 
 type ConversationRow = Tables<'conversations'>
 
@@ -55,6 +55,15 @@ const VALID_INTENTS: Intent[] = ['buy', 'rent', 'explore']
 const VALID_PROPERTY_TYPES: PropertyType[] = ['apartment', 'villa', 'plot', 'commercial']
 const VALID_TIMELINES: Timeline[] = ['urgent', 'soon', 'flexible']
 const STRICT_PROMPT_STEPS = new Set<ChatStep>([
+    ChatStep.ASK_LANGUAGE,
+    ChatStep.ASK_INTENT,
+    ChatStep.ASK_LOCATION,
+    ChatStep.ASK_BUDGET,
+    ChatStep.ASK_PROPERTY_TYPE,
+    ChatStep.ASK_CONFIG,
+    ChatStep.ASK_TIMELINE,
+    ChatStep.ASK_NO_RESULTS_ACTION,
+    ChatStep.SHOW_RESULTS,
     ChatStep.CAPTURE_NAME,
     ChatStep.CAPTURE_PHONE,
 ])
@@ -1829,15 +1838,15 @@ export async function processConversationTurn(
             conversation.collected_data.status = 'escalated'
             conversation.step = getForwardStep(currentStep, conversation.collected_data)
             nextStep = conversation.step
-            decisionReason = 'manual_escalation_handled'
+            decisionReason = 'conversation_restart_required_after_escalation'
             logTrace(stepTrace, 'escalation_triggered', 'info', { channel: 'stub' }, 'manual_escalation_handled')
-            response = getPrompt(ChatStep.ESCALATE, conversation.collected_data.language)
+            response = getRestartSessionPrompt(conversation.collected_data.language)
             break
         }
 
         case ChatStep.DONE: {
-            decisionReason = 'conversation_completed'
-            response = getPrompt(ChatStep.DONE, conversation.collected_data.language)
+            decisionReason = 'conversation_restart_required'
+            response = getRestartSessionPrompt(conversation.collected_data.language)
             break
         }
 

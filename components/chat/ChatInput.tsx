@@ -43,7 +43,7 @@ export default function ChatInput({ loading, onSend }: ChatInputProps) {
                 value={value}
                 onChange={(event) => setValue(event.target.value)}
                 placeholder="Ask about area, budget, or property type"
-                className="h-11 min-w-0 flex-1 rounded-xl border border-transparent bg-transparent px-2 text-[15px] text-zinc-900 outline-none placeholder:text-zinc-400 transition focus:bg-transparent"
+                className="h-11 min-w-0 flex-1 rounded-xl capitalize border border-transparent bg-transparent px-2 text-[15px] text-zinc-900 outline-none placeholder:text-zinc-400 transition focus:bg-transparent"
                 autoComplete="off"
                 disabled={loading}
             />

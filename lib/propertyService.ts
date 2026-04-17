@@ -21,6 +21,10 @@ export interface PropertyTraceContext extends LogContext {
     debugMode?: boolean
 }
 
+function hasBudgetConstraint(filters: PropertyFilter): boolean {
+    return typeof filters.budget_min === 'number' || typeof filters.budget_max === 'number'
+}
+
 /**
  * Validates location before filtering.
  * Returns true if location is viable for filtering.
@@ -139,6 +143,7 @@ export async function getMatchingProperties(
     trace?: PropertyTraceContext,
 ): Promise<PropertyResult[]> {
     const startedAt = Date.now()
+    const budgetConstrained = hasBudgetConstraint(filters)
 
     try {
         if (trace) {
@@ -249,6 +254,31 @@ export async function getMatchingProperties(
 
         if (retry1Properties.length > 0) {
             return retry1Properties
+        }
+
+        if (budgetConstrained) {
+            if (trace) {
+                logEvent({
+                    ...trace,
+                    event: 'property_query_result',
+                    level: 'info',
+                    data: {
+                        stage: 'budget_strict_exit',
+                        count: 0,
+                        property_query_duration_ms: Date.now() - startedAt,
+                        filters_now_applied: {
+                            location: isValidLocation(filters.location),
+                            budget_min: typeof filters.budget_min === 'number',
+                            budget_max: typeof filters.budget_max === 'number',
+                            property_type: !!filters.property_type,
+                            bhk: false,
+                        },
+                    },
+                    decisionReason: 'property_query_budget_strict_no_match',
+                })
+            }
+
+            return []
         }
 
         // Retry 2: Remove price filters

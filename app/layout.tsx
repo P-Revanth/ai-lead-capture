@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import { Geist, Geist_Mono } from 'next/font/google'
+import ChatWidget from '@/components/chat/ChatWidget'
 import './globals.css'
 
 const geistSans = Geist({
@@ -24,7 +25,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
-      <body className="min-h-dvh overflow-y-auto bg-zinc-50 text-zinc-900">{children}</body>
+      <body className="min-h-dvh overflow-y-auto bg-zinc-50 text-zinc-900">
+        {children}
+        <ChatWidget />
+      </body>
     </html>
   )
 }

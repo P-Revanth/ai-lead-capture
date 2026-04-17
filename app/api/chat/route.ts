@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
     const cookieSessionId = request.cookies.get('lead_ai_session_id')?.value ?? null
 
     let sessionId = 'unknown'
-    let conversationStep: ChatStep = ChatStep.ASK_INTENT
+    let conversationStep: ChatStep = ChatStep.ASK_LANGUAGE
 
     try {
         const body = await request.json()
@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
             logEvent({
                 sessionId: requestedSessionId,
                 requestId,
-                step: ChatStep.ASK_INTENT,
+                step: ChatStep.ASK_LANGUAGE,
                 event: 'session_id_mismatch',
                 level: 'warn',
                 data: {
@@ -117,6 +117,7 @@ export async function POST(request: NextRequest) {
         const response: ChatApiResponse = {
             response: result.response,
             step: verifiedConversation.step,
+            language: verifiedConversation.collected_data.language,
             requiresEscalation: result.requiresEscalation,
             isCompleted: result.isCompleted,
             requestId,

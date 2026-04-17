@@ -1,7 +1,14 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChatApiResponse, ChatStep, PropertyResult } from '@/types/chat'
+import {
+    ChatApiResponse,
+    ChatStep,
+    ChatSuggestionsApiResponse,
+    Language,
+    PropertyResult,
+    QuickReplyOption,
+} from '@/types/chat'
 
 type MessageRole = 'user' | 'sarah'
 
@@ -18,6 +25,8 @@ interface PersistedChatState {
     sessionId: string
     messages: UIMessage[]
     latestStep: ChatStep | null
+    preferredLanguage: Language | null
+    quickReplies: QuickReplyOption[]
 }
 
 const CHAT_STATE_KEY = 'lead_ai_chat_state_v1'
@@ -52,6 +61,34 @@ export function useChat() {
     const [loading, setLoading] = useState<boolean>(false)
     const [isSearching, setIsSearching] = useState<boolean>(false)
     const [error, setError] = useState<string | null>(null)
+    const [preferredLanguage, setPreferredLanguage] = useState<Language | null>(null)
+    const [quickReplies, setQuickReplies] = useState<QuickReplyOption[]>([
+        { label: 'English', value: 'English' },
+        { label: 'తెలుగు', value: 'తెలుగు' },
+        { label: 'हिंदी', value: 'हिंदी' },
+    ])
+
+    const fetchSuggestions = useCallback(async (targetSessionId: string) => {
+        if (!targetSessionId) {
+            return
+        }
+
+        const response = await fetch('/api/chat/suggestions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ sessionId: targetSessionId }),
+        })
+
+        if (!response.ok) {
+            throw new Error(`Suggestions API failed with status ${response.status}`)
+        }
+
+        const data = (await response.json()) as ChatSuggestionsApiResponse
+        setPreferredLanguage(data.language ?? null)
+        setQuickReplies(Array.isArray(data.options) ? data.options.slice(0, 5) : [])
+    }, [])
 
     useEffect(() => {
         if (typeof window === 'undefined') {
@@ -71,6 +108,8 @@ export function useChat() {
                 setSessionId(parsed.sessionId)
                 setMessages(parsed.messages)
                 setLatestStep(parsed.latestStep ?? null)
+                setPreferredLanguage(parsed.preferredLanguage ?? null)
+                setQuickReplies(Array.isArray(parsed.quickReplies) ? parsed.quickReplies : [])
                 return
             }
         } catch {
@@ -90,10 +129,22 @@ export function useChat() {
             sessionId,
             messages,
             latestStep,
+            preferredLanguage,
+            quickReplies,
         }
 
         window.localStorage.setItem(CHAT_STATE_KEY, JSON.stringify(payload))
-    }, [sessionId, messages, latestStep])
+    }, [sessionId, messages, latestStep, preferredLanguage, quickReplies])
+
+    useEffect(() => {
+        if (!sessionId) {
+            return
+        }
+
+        void fetchSuggestions(sessionId).catch(() => {
+            // keep last known quick replies
+        })
+    }, [sessionId, fetchSuggestions])
 
     const sendMessage = useCallback(
         async (input: string) => {
@@ -142,6 +193,10 @@ export function useChat() {
 
                 setMessages((prev) => [...prev, botMessage])
                 setLatestStep(data.step)
+                setPreferredLanguage(data.language ?? null)
+                void fetchSuggestions(sessionId).catch(() => {
+                    // keep last known quick replies
+                })
             } catch {
                 setError(toFallbackErrorMessage())
             } finally {
@@ -149,7 +204,7 @@ export function useChat() {
                 setIsSearching(false)
             }
         },
-        [loading, sessionId],
+        [fetchSuggestions, loading, sessionId],
     )
 
     // Auto-trigger search results fetch when transitioning to SHOW_RESULTS
@@ -200,7 +255,11 @@ export function useChat() {
                             return updated
                         })
                         setLatestStep(data.step)
-                    } catch (err) {
+                        setPreferredLanguage(data.language ?? null)
+                        void fetchSuggestions(sessionId).catch(() => {
+                            // keep last known quick replies
+                        })
+                    } catch {
                         setError(toFallbackErrorMessage())
                     } finally {
                         setIsSearching(false)
@@ -210,7 +269,7 @@ export function useChat() {
                 void fetchResults()
             }
         }
-    }, [latestStep, sessionId, isSearching, loading, messages])
+    }, [fetchSuggestions, latestStep, sessionId, isSearching, loading, messages])
 
     const canShowQuickReplies = useMemo(() => {
         return latestStep === ChatStep.ASK_INTENT || latestStep === ChatStep.ASK_TIMELINE
@@ -223,6 +282,8 @@ export function useChat() {
         loading,
         isSearching,
         error,
+        preferredLanguage,
+        quickReplies,
         sendMessage,
         canShowQuickReplies,
     }

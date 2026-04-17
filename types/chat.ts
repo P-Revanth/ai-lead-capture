@@ -1,4 +1,5 @@
 export enum ChatStep {
+    ASK_LANGUAGE = 'ask_language',
     ASK_INTENT = 'ask_intent',
     ASK_LOCATION = 'ask_location',
     ASK_BUDGET = 'ask_budget',
@@ -6,12 +7,14 @@ export enum ChatStep {
     ASK_CONFIG = 'ask_config',
     ASK_TIMELINE = 'ask_timeline',
     SHOW_RESULTS = 'show_results',
+    ASK_NO_RESULTS_ACTION = 'ask_no_results_action',
     CAPTURE_NAME = 'capture_name',
     CAPTURE_PHONE = 'capture_phone',
     ESCALATE = 'escalate',
     DONE = 'done',
 }
 
+export type Language = 'en' | 'te' | 'hi'
 export type Intent = 'buy' | 'rent' | 'explore'
 export type PropertyType = 'apartment' | 'villa' | 'plot' | 'commercial'
 export type Timeline = 'urgent' | 'soon' | 'flexible'
@@ -23,6 +26,7 @@ export interface ChatMessage {
 }
 
 export interface CollectedData {
+    language?: Language
     intent?: Intent
     location?: string
     budget_min?: number | null
@@ -77,9 +81,25 @@ export interface ChatApiRequest {
     userMessage: string
 }
 
+export interface QuickReplyOption {
+    label: string
+    value: string
+}
+
+export interface ChatSuggestionsApiRequest {
+    sessionId: string
+}
+
+export interface ChatSuggestionsApiResponse {
+    step: ChatStep
+    language: Language
+    options: QuickReplyOption[]
+}
+
 export interface ChatApiResponse {
     response: string
     step: ChatStep
+    language?: Language
     requiresEscalation: boolean
     isCompleted: boolean
     properties?: PropertyResult[]

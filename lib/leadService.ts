@@ -23,6 +23,27 @@ export interface LeadTraceContext extends LogContext {
 
 const LOW_QUALITY_LOCATIONS = new Set(['anywhere', 'all', 'vizag', 'india'])
 
+function hasMissingEscalationTriggeredColumnError(message: string | undefined): boolean {
+    if (!message) {
+        return false
+    }
+
+    const normalized = message.toLowerCase()
+    return normalized.includes('escalation_triggered')
+        && (normalized.includes('column') || normalized.includes('schema cache'))
+}
+
+function normalizeLeadRow(row: LeadRow): LeadRow {
+    if (typeof row.escalation_triggered === 'boolean') {
+        return row
+    }
+
+    return {
+        ...row,
+        escalation_triggered: row.status === 'escalated',
+    }
+}
+
 function normalizeText(value: string | null | undefined): string | null {
     if (value == null) {
         return null
@@ -135,6 +156,7 @@ function buildInsertPayload(input: CreateOrUpdateLeadInput): TablesInsert<'leads
         bhk: normalizeText(collected.bhk),
         timeline: collected.timeline ?? null,
         status: collected.status ?? 'new',
+        escalation_triggered: false,
     }
 }
 
@@ -240,7 +262,7 @@ async function updateLead(
     }
 
     return {
-        lead: data as LeadRow,
+        lead: normalizeLeadRow(data as LeadRow),
         action: 'updated',
         skippedFields,
     }
@@ -248,7 +270,28 @@ async function updateLead(
 
 async function insertLead(input: CreateOrUpdateLeadInput, trace?: LeadTraceContext): Promise<CreateOrUpdateLeadResult> {
     const payload = buildInsertPayload(input)
-    const { data, error } = await supabase.from('leads').insert(payload).select('*').single()
+
+    let { data, error } = await supabase.from('leads').insert(payload).select('*').single()
+
+    if ((error || !data) && hasMissingEscalationTriggeredColumnError(error?.message)) {
+        const legacyPayload: TablesInsert<'leads'> = { ...payload }
+        delete (legacyPayload as { escalation_triggered?: boolean | null }).escalation_triggered
+        const fallbackResult = await supabase.from('leads').insert(legacyPayload).select('*').single()
+        data = fallbackResult.data
+        error = fallbackResult.error
+
+        if (trace) {
+            logEvent({
+                ...trace,
+                event: 'lead_create_legacy_schema_fallback',
+                level: 'warn',
+                data: {
+                    reason: 'missing_escalation_triggered_column',
+                },
+                decisionReason: 'lead_create_fallback_without_escalation_triggered',
+            })
+        }
+    }
 
     if (error || !data) {
         throw new Error(`Failed to create lead: ${error?.message ?? 'Unknown insert error'}`)
@@ -270,7 +313,7 @@ async function insertLead(input: CreateOrUpdateLeadInput, trace?: LeadTraceConte
     }
 
     return {
-        lead: data as LeadRow,
+        lead: normalizeLeadRow(data as LeadRow),
         action: 'created',
         skippedFields: [],
     }
@@ -289,4 +332,63 @@ export async function createOrUpdateLead(input: CreateOrUpdateLeadInput, trace?:
     }
 
     return insertLead(input, trace)
+}
+
+export async function markLeadEscalationTriggered(
+    leadId: string,
+    trace?: LeadTraceContext,
+): Promise<LeadRow> {
+    let { data, error } = await supabase
+        .from('leads')
+        .update({
+            escalation_triggered: true,
+            status: 'escalated',
+        })
+        .eq('id', leadId)
+        .select('*')
+        .single()
+
+    if ((error || !data) && hasMissingEscalationTriggeredColumnError(error?.message)) {
+        const fallbackResult = await supabase
+            .from('leads')
+            .update({ status: 'escalated' })
+            .eq('id', leadId)
+            .select('*')
+            .single()
+
+        data = fallbackResult.data
+        error = fallbackResult.error
+
+        if (trace) {
+            logEvent({
+                ...trace,
+                event: 'lead_mark_legacy_schema_fallback',
+                level: 'warn',
+                data: {
+                    leadId,
+                    reason: 'missing_escalation_triggered_column',
+                },
+                decisionReason: 'lead_mark_fallback_without_escalation_triggered',
+            })
+        }
+    }
+
+    if (error || !data) {
+        throw new Error(`Failed to mark lead escalation_triggered: ${error?.message ?? 'Unknown update error'}`)
+    }
+
+    if (trace) {
+        logEvent({
+            ...trace,
+            event: 'lead_notification_marked',
+            level: 'info',
+            data: {
+                leadId: data.id,
+                escalation_triggered: data.escalation_triggered,
+            },
+            decisionReason: 'lead_notification_marked_success',
+        })
+    }
+
+    return normalizeLeadRow(data as LeadRow)
 }

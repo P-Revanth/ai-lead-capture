@@ -7,9 +7,9 @@ import MessageBubble from '@/components/chat/MessageBubble'
 import PropertyCard from '@/components/chat/PropertyCard'
 import QuickReplyOptions from '@/components/chat/QuickReplyOptions'
 import { useChat } from '@/hooks/useChat'
+import { getShowResultsActionOptions, getShowResultsCta } from '@/lib/prompts'
 
-const INITIAL_EMPTY_STATE = 'Hi, What are you looking for?'
-const SHOW_RESULTS_CTA = 'Would you like to schedule a visit or talk to the agent?'
+const INITIAL_EMPTY_STATE = 'Hello, What are you looking for?'
 
 // const STEP_PROMPT_FALLBACKS: Partial<Record<ChatStep, string>> = {
 //     [ChatStep.ASK_INTENT]: 'Are you looking to buy, rent, or just exploring?',
@@ -22,27 +22,18 @@ const SHOW_RESULTS_CTA = 'Would you like to schedule a visit or talk to the agen
 //     [ChatStep.CAPTURE_PHONE]: 'Please share your phone number so the agent can contact you.',
 // }
 
-function getStepQuickReplies(step: ChatStep | null): string[] {
-    if (step === ChatStep.ASK_INTENT) {
-        return ['Buy', 'Rent', 'Exploring']
-    }
-    if (step === ChatStep.ASK_PROPERTY_TYPE) {
-        return ['Apartment', 'Villa', 'Plot', 'Commercial']
-    }
-    if (step === ChatStep.ASK_TIMELINE) {
-        return ['Urgent', 'Soon', 'Flexible']
-    }
-    return []
-}
-
 export default function ChatContainer() {
-    const { messages, latestStep, loading, isSearching, error, sendMessage } = useChat()
+    const { messages, latestStep, loading, isSearching, error, sendMessage, preferredLanguage, quickReplies } = useChat()
 
     const scrollContainerRef = useRef<HTMLDivElement | null>(null)
     const bottomRef = useRef<HTMLDivElement | null>(null)
     const autoScrollEnabledRef = useRef<boolean>(true)
 
-    const quickReplies = useMemo(() => getStepQuickReplies(latestStep), [latestStep])
+    const showResultsCta = useMemo(() => getShowResultsCta(preferredLanguage), [preferredLanguage])
+    const showResultsActionOptions = useMemo(
+        () => getShowResultsActionOptions(preferredLanguage),
+        [preferredLanguage],
+    )
     const latestSarahMessageId = useMemo(() => {
         const reversed = [...messages].reverse()
         const latestSarahMessage = reversed.find((message) => message.role === 'sarah')
@@ -123,26 +114,27 @@ export default function ChatContainer() {
 
                 <section className="relative flex min-h-0 flex-1 flex-col">
                     {showFocusPanel ? (
-                        <div className="flex shrink-0 flex-col items-center justify-center py-6 text-center sm:py-8">
-                            <div className="max-w-3xl px-2 sm:px-0">
-                                <p className="text-sm text-zinc-500 sm:text-base">
-                                    {isResultsMode ? 'Your curated options are ready.' : 'A few guided questions will narrow things down quickly.'}
-                                </p>
-                                <h2 className="mt-5 text-[clamp(2.1rem,5vw,4.6rem)] font-medium leading-[1.02] tracking-tight text-zinc-900">
+                        <div className="absolute inset-x-0 top-0 bottom-28 flex items-center justify-center px-2 text-center sm:px-0">
+                            <div className="w-full max-w-3xl">
+                                <h2 className="text-[clamp(2.1rem,5vw,4.6rem)] font-medium leading-[1.02] tracking-tight text-zinc-900">
                                     {INITIAL_EMPTY_STATE}
                                 </h2>
-
-                                {showQuickRepliesInFocus ? (
-                                    <div className="mt-7">
-                                        <QuickReplyOptions
-                                            options={quickReplies}
-                                            disabled={loading || isSearching}
-                                            onSelect={(value) => {
-                                                void sendMessage(value)
-                                            }}
-                                        />
-                                    </div>
-                                ) : null}
+                                <div className="mt-4 flex flex-col items-center justify-center">
+                                    <p className="text-sm text-zinc-500 sm:text-base">
+                                        {isResultsMode ? 'Your curated options are ready.' : 'Start by selecting your preferred language.'}
+                                    </p>
+                                    {showQuickRepliesInFocus ? (
+                                        <div className="mt-3">
+                                            <QuickReplyOptions
+                                                options={quickReplies}
+                                                disabled={loading || isSearching}
+                                                onSelect={(value) => {
+                                                    void sendMessage(value)
+                                                }}
+                                            />
+                                        </div>
+                                    ) : null}
+                                </div>
                             </div>
                         </div>
                     ) : null}
@@ -179,9 +171,9 @@ export default function ChatContainer() {
                                                             <PropertyCard key={property.id} property={property} />
                                                         ))}
                                                     </div>
-                                                    <p className="text-sm text-zinc-700">{SHOW_RESULTS_CTA}</p>
+                                                    <p className="text-sm text-zinc-700 capitalize">{showResultsCta}</p>
                                                     <QuickReplyOptions
-                                                        options={['Schedule a visit', 'Talk to the agent']}
+                                                        options={showResultsActionOptions}
                                                         align="left"
                                                         disabled={loading || isSearching}
                                                         onSelect={(value) => {

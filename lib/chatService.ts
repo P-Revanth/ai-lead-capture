@@ -5,6 +5,7 @@ import {
     CollectedData,
     ChatDebugInfo,
     ConversationRecord,
+    Language,
     Intent,
     PropertyType,
     Timeline,
@@ -12,8 +13,8 @@ import {
 } from '@/types/chat'
 import { Json, Tables, TablesInsert, TablesUpdate } from '@/types/supabase'
 import { getMatchingProperties, isValidLocation, PropertyFilter } from '@/lib/propertyService'
-import { createOrUpdateLead } from '@/lib/leadService'
-import { buildEscalationPayload, notifyAgent } from '@/lib/escalationService'
+import { createOrUpdateLead, markLeadEscalationTriggered } from '@/lib/leadService'
+import { notifyAgent } from '@/lib/notificationService'
 import { logEvent, incrementMetric, LogContext } from '@/lib/logger'
 import {
     extractEntities,
@@ -23,6 +24,7 @@ import {
     RESPONSE_PROMPT_VERSION,
     ExtractionResult,
 } from '@/lib/llmService'
+import { getNoResultsActionPrompt, getPrompt, getResultsSummaryPrompt, normalizeLanguage } from '@/lib/prompts'
 
 type ConversationRow = Tables<'conversations'>
 
@@ -32,21 +34,8 @@ function toJson(value: unknown): Json {
 
 const CONVERSATION_EXPIRY_MS = 30 * 60 * 1000
 
-const STEP_PROMPTS: Record<ChatStep, string> = {
-    [ChatStep.ASK_INTENT]: 'Are you looking to buy, rent, or just exploring?',
-    [ChatStep.ASK_LOCATION]: 'Which area in Visakhapatnam are you interested in?',
-    [ChatStep.ASK_BUDGET]: "What's your budget range for this property?",
-    [ChatStep.ASK_PROPERTY_TYPE]: 'What type of property are you looking for? (apartment, villa, plot, or commercial)',
-    [ChatStep.ASK_CONFIG]: 'What BHK configuration are you looking for? (e.g., 1BHK, 2BHK, 3BHK)',
-    [ChatStep.ASK_TIMELINE]: 'When are you planning to make a decision? (urgent, soon, or flexible)',
-    [ChatStep.SHOW_RESULTS]: 'Let me check matching properties for you.',
-    [ChatStep.CAPTURE_NAME]: 'May I have your name?',
-    [ChatStep.CAPTURE_PHONE]: 'Please share your phone number so the agent can contact you.',
-    [ChatStep.ESCALATE]: 'I will connect you with our human agent now.',
-    [ChatStep.DONE]: 'Thank you for using our service! A representative will contact you shortly.',
-}
-
 const STEP_ORDER: ChatStep[] = [
+    ChatStep.ASK_LANGUAGE,
     ChatStep.ASK_INTENT,
     ChatStep.ASK_LOCATION,
     ChatStep.ASK_BUDGET,
@@ -54,16 +43,21 @@ const STEP_ORDER: ChatStep[] = [
     ChatStep.ASK_CONFIG,
     ChatStep.ASK_TIMELINE,
     ChatStep.SHOW_RESULTS,
+    ChatStep.ASK_NO_RESULTS_ACTION,
     ChatStep.CAPTURE_NAME,
     ChatStep.CAPTURE_PHONE,
     ChatStep.ESCALATE,
     ChatStep.DONE,
 ]
 
+const VALID_LANGUAGES: Language[] = ['en', 'te', 'hi']
 const VALID_INTENTS: Intent[] = ['buy', 'rent', 'explore']
 const VALID_PROPERTY_TYPES: PropertyType[] = ['apartment', 'villa', 'plot', 'commercial']
 const VALID_TIMELINES: Timeline[] = ['urgent', 'soon', 'flexible']
-const SESSION_ESCALATION_TRACKER = new Map<string, Set<string>>()
+const STRICT_PROMPT_STEPS = new Set<ChatStep>([
+    ChatStep.CAPTURE_NAME,
+    ChatStep.CAPTURE_PHONE,
+])
 const EXTRACTION_BUFFER = new Map<string, ExtractedEntities>()
 const VALID_EXTRACTION_STEP_TRACKER = new Map<string, Set<ChatStep>>()
 const REQUEST_RUNTIME_STATE = new Map<string, RequestRuntimeState>()
@@ -228,6 +222,8 @@ function getStepFields(step: ChatStep): ExtractionField[] {
 
 function hasRequiredFieldCollected(step: ChatStep, collectedData: CollectedData): boolean {
     switch (step) {
+        case ChatStep.ASK_LANGUAGE:
+            return !!collectedData.language
         case ChatStep.ASK_INTENT:
             return !!collectedData.intent
         case ChatStep.ASK_LOCATION:
@@ -330,6 +326,23 @@ async function formatResponseWithLlm(
     fallback: string,
     trace: LogContext & { debugMode: boolean },
 ): Promise<string> {
+    if (STRICT_PROMPT_STEPS.has(step)) {
+        logTrace(trace, 'llm_response_generated', 'info', {
+            usedFallback: true,
+            prompt_version: RESPONSE_PROMPT_VERSION,
+        }, 'response_strict_step_passthrough')
+        return fallback
+    }
+
+    const language = normalizeLanguage(conversation.collected_data.language)
+    if (language !== 'en') {
+        logTrace(trace, 'llm_response_generated', 'info', {
+            usedFallback: true,
+            prompt_version: RESPONSE_PROMPT_VERSION,
+        }, 'response_language_prompt_passthrough')
+        return fallback
+    }
+
     const generated = await generateResponse(step, conversation.collected_data, fallback)
     const usedFallback = generated === fallback
 
@@ -358,7 +371,7 @@ function parseDbTimestampToMs(value: string): number {
 
 function toChatStep(value: string | null | undefined): ChatStep {
     if (!value) {
-        return ChatStep.ASK_INTENT
+        return ChatStep.ASK_LANGUAGE
     }
 
     const steps = Object.values(ChatStep) as string[]
@@ -373,7 +386,7 @@ function toChatStep(value: string | null | undefined): ChatStep {
         return legacyNormalized as ChatStep
     }
 
-    return ChatStep.ASK_INTENT
+    return ChatStep.ASK_LANGUAGE
 }
 
 function asCollectedData(value: unknown): CollectedData {
@@ -397,6 +410,28 @@ function findKeyword<T extends string>(message: string, values: readonly T[]): T
 
 function normalizeInput(input: string): string {
     return input.trim().toLowerCase()
+}
+
+function parseLanguageInput(input: string): Language | null {
+    const normalized = normalizeInput(input)
+
+    if (!normalized) {
+        return null
+    }
+
+    if (normalized === 'en' || normalized.includes('english')) {
+        return 'en'
+    }
+
+    if (normalized === 'te' || normalized.includes('telugu') || /తెలుగు/u.test(input)) {
+        return 'te'
+    }
+
+    if (normalized === 'hi' || normalized.includes('hindi') || /हिंदी/u.test(input)) {
+        return 'hi'
+    }
+
+    return null
 }
 
 function parseBudget(message: string): { min: number | null; max: number | null } {
@@ -437,11 +472,32 @@ function parseTimelineInput(message: string): Timeline | undefined {
         return 'soon'
     }
 
-    if (/(flexible|explor|later|no hurry|no rush|sometime)/.test(normalized)) {
+    if (/(flexible|explor|later|no hurry|no rush|sometime|not sure|notsure|dont know|don't know|unsure)/.test(normalized)) {
         return 'flexible'
     }
 
     return findKeyword(normalized, VALID_TIMELINES)
+}
+
+function isOtherOrNotSureInput(message: string): boolean {
+    const normalized = normalizeInput(message)
+    if (!normalized) {
+        return false
+    }
+
+    if (/(other|not sure|notsure|dont know|don't know|unsure|any|anything)/.test(normalized)) {
+        return true
+    }
+
+    if (/ఇతర|తెలియదు|ఖచ్చితంగా తెలియదు/u.test(message)) {
+        return true
+    }
+
+    if (/अन्य|पक्का नहीं|नहीं पता/u.test(message)) {
+        return true
+    }
+
+    return false
 }
 
 function normalizeIndianPhone(input: string): string | null {
@@ -470,18 +526,29 @@ function isAgentHandoffIntent(message: string): boolean {
     return /(talk to (an?|the)? ?agent|speak to (an?|the)? ?agent|human agent|real person|contact agent|schedule( a)? visit|site visit|arrange( a)? visit)/.test(normalized)
 }
 
-function hasEscalatedPhoneInSession(sessionId: string, phone: string): boolean {
-    const set = SESSION_ESCALATION_TRACKER.get(sessionId)
-    return set ? set.has(phone) : false
+function isLocalizedAgentIntent(message: string): boolean {
+    return /ఏజెంట్|एजेंट|एजेन्ट/u.test(message)
 }
 
-function markEscalatedPhoneInSession(sessionId: string, phone: string): void {
-    const existing = SESSION_ESCALATION_TRACKER.get(sessionId)
-    if (existing) {
-        existing.add(phone)
-        return
+function isSeeAvailableOptionsIntent(message: string): boolean {
+    const normalized = normalizeInput(message)
+    if (!normalized) {
+        return false
     }
-    SESSION_ESCALATION_TRACKER.set(sessionId, new Set([phone]))
+
+    if (/(see available options|show available options|see options|show options|available options|available properties)/.test(normalized)) {
+        return true
+    }
+
+    if (/అందుబాటులో|ఎంపికలు|ఆప్షన్స్|ఆప్షన్లు/u.test(message)) {
+        return true
+    }
+
+    if (/उपलब्ध|विकल्प|ऑप्शन/u.test(message)) {
+        return true
+    }
+
+    return false
 }
 
 function shouldAppendMessage(messages: ChatMessage[], message: ChatMessage): boolean {
@@ -529,6 +596,8 @@ function applyNonNullExtraction(target: ExtractedEntities, source: ExtractedEnti
 
 function shouldSkipStep(step: ChatStep, data: CollectedData): boolean {
     switch (step) {
+        case ChatStep.ASK_LANGUAGE:
+            return !!data.language
         case ChatStep.ASK_INTENT:
             return !!data.intent
         case ChatStep.ASK_LOCATION:
@@ -538,7 +607,7 @@ function shouldSkipStep(step: ChatStep, data: CollectedData): boolean {
         case ChatStep.ASK_PROPERTY_TYPE:
             return !!data.property_type || !!data.bhk
         case ChatStep.ASK_CONFIG:
-            return !!data.bhk
+            return !!data.bhk || data.property_type === undefined || (data.property_type !== 'apartment' && data.property_type !== 'villa')
         case ChatStep.ASK_TIMELINE:
             return !!data.timeline
         default:
@@ -632,7 +701,7 @@ export async function loadOrCreateConversation(sessionId: string): Promise<Conve
                     id: String(row.id),
                     session_id: String(row.session_id ?? sessionId),
                     messages: asMessages(row.messages),
-                    step: ChatStep.ASK_INTENT,
+                    step: ChatStep.ASK_LANGUAGE,
                     collected_data: {},
                     created_at: createdAt,
                 }
@@ -642,7 +711,7 @@ export async function loadOrCreateConversation(sessionId: string): Promise<Conve
                 id: String(row.id),
                 session_id: String(row.session_id ?? sessionId),
                 messages: asMessages(row.messages),
-                step: toChatStep(row.step ?? ChatStep.ASK_INTENT),
+                step: toChatStep(row.step ?? ChatStep.ASK_LANGUAGE),
                 collected_data: asCollectedData(row.collected_data),
                 created_at: createdAt,
             }
@@ -662,7 +731,7 @@ export async function loadOrCreateConversation(sessionId: string): Promise<Conve
                 id: String(row.id),
                 session_id: String(row.session_id ?? sessionId),
                 messages: asMessages(row.messages),
-                step: ChatStep.ASK_INTENT,
+                step: ChatStep.ASK_LANGUAGE,
                 collected_data: {},
                 created_at: createdAt,
             }
@@ -672,7 +741,7 @@ export async function loadOrCreateConversation(sessionId: string): Promise<Conve
             id: String(row.id),
             session_id: String(row.session_id ?? sessionId),
             messages: asMessages(row.messages),
-            step: toChatStep(row.step ?? ChatStep.ASK_INTENT),
+            step: toChatStep(row.step ?? ChatStep.ASK_LANGUAGE),
             collected_data: asCollectedData(row.collected_data),
             created_at: createdAt,
         }
@@ -685,7 +754,7 @@ export async function loadOrCreateConversation(sessionId: string): Promise<Conve
     const insertPayload: TablesInsert<'conversations'> = {
         session_id: sessionId,
         messages: toJson([] as ChatMessage[]),
-        step: ChatStep.ASK_INTENT,
+        step: ChatStep.ASK_LANGUAGE,
         collected_data: toJson({} as CollectedData),
     }
 
@@ -742,7 +811,7 @@ export async function readConversationBySessionId(sessionId: string): Promise<Co
         id: String(row.id),
         session_id: String(row.session_id ?? sessionId),
         messages: asMessages(row.messages),
-        step: toChatStep(row.step ?? ChatStep.ASK_INTENT),
+        step: toChatStep(row.step ?? ChatStep.ASK_LANGUAGE),
         collected_data: asCollectedData(row.collected_data),
         created_at: String(row.created_at ?? nowIso()),
     }
@@ -792,7 +861,7 @@ export async function processConversationTurn(
     }
 
     if (rawTrimmed.length === 0 && conversation.messages.length === 0) {
-        const prompt = STEP_PROMPTS[conversation.step]
+        const prompt = getPrompt(conversation.step, conversation.collected_data.language)
         const stepTrace = traceFor(conversation.step)
         const formattedPrompt = await formatResponseWithLlm(conversation, conversation.step, prompt, stepTrace)
         llmUsed = true
@@ -841,7 +910,7 @@ export async function processConversationTurn(
         }
     }
 
-    let response = STEP_PROMPTS[conversation.step]
+    let response = getPrompt(conversation.step, conversation.collected_data.language)
     let properties = undefined
 
     if (
@@ -867,6 +936,48 @@ export async function processConversationTurn(
     }
 
     switch (conversation.step) {
+        case ChatStep.ASK_LANGUAGE: {
+            const stepTrace = traceFor(conversation.step)
+            const repeatedInput = isRepeatedInput(runtimeState, conversation.step, normalized)
+            const candidateLanguage = parseLanguageInput(rawTrimmed)
+
+            if (!candidateLanguage || !VALID_LANGUAGES.includes(candidateLanguage)) {
+                const retryCount = incrementRetryCount(runtimeState, conversation.step)
+                rejectedFields.push('language')
+
+                logTrace(
+                    stepTrace,
+                    'validation_failed',
+                    'warn',
+                    { reason: 'invalid language', retryCount },
+                    'validation_failed_missing_language',
+                )
+
+                if (repeatedInput || retryCount >= 2) {
+                    fallbackTriggered = true
+                    incrementMetric('step_stuck_count')
+                    conversation.collected_data.language = 'en'
+                    conversation.step = getForwardStep(currentStep, conversation.collected_data)
+                    nextStep = conversation.step
+                    decisionReason = 'language_fallback_to_english'
+                    response = getPrompt(conversation.step, conversation.collected_data.language)
+                    break
+                }
+
+                decisionReason = 'validation_failed_missing_language'
+                response = getPrompt(ChatStep.ASK_LANGUAGE, 'en')
+                break
+            }
+
+            resetRetryCount(runtimeState, conversation.step)
+            conversation.collected_data.language = candidateLanguage
+            conversation.step = getForwardStep(currentStep, conversation.collected_data)
+            nextStep = conversation.step
+            decisionReason = 'language_selected_success'
+            response = getPrompt(conversation.step, candidateLanguage)
+            break
+        }
+
         case ChatStep.ASK_INTENT: {
             const stepTrace = traceFor(conversation.step)
             const extraction = await maybePopulateExtractionBuffer(conversation, conversation.step, rawTrimmed, stepTrace)
@@ -909,13 +1020,13 @@ export async function processConversationTurn(
                     conversation.step = getFallbackStep(conversation.step)
                     nextStep = conversation.step
                     decisionReason = 'fallback_triggered_retry_limit'
-                    response = STEP_PROMPTS[conversation.step]
+                    response = getPrompt(conversation.step, conversation.collected_data.language)
                     buffer.intent = null
                     break
                 }
 
                 logLlmMerge(stepTrace, fieldsUpdated, fieldsSkipped, 'null', 'validation_failed_missing_intent')
-                response = STEP_PROMPTS[conversation.step]
+                response = getPrompt(conversation.step, conversation.collected_data.language)
                 decisionReason = 'validation_failed_missing_intent'
                 buffer.intent = null
                 break
@@ -930,7 +1041,7 @@ export async function processConversationTurn(
             conversation.step = getForwardStep(currentStep, conversation.collected_data)
             nextStep = conversation.step
             decisionReason = 'intent_normalized_success'
-            response = STEP_PROMPTS[conversation.step]
+            response = getPrompt(conversation.step, conversation.collected_data.language)
             break
         }
 
@@ -1001,7 +1112,7 @@ export async function processConversationTurn(
                 }
 
                 logLlmMerge(stepTrace, fieldsUpdated, fieldsSkipped, 'null', 'validation_failed_missing_location')
-                response = STEP_PROMPTS[conversation.step]
+                response = getPrompt(conversation.step, conversation.collected_data.language)
                 decisionReason = 'validation_failed_missing_location'
                 buffer.location = null
                 break
@@ -1023,7 +1134,7 @@ export async function processConversationTurn(
             decisionReason = fieldsSkipped.some((entry) => entry.includes('low_quality'))
                 ? 'validation_failed_low_quality_location'
                 : 'location_normalized_success'
-            response = STEP_PROMPTS[conversation.step]
+            response = getPrompt(conversation.step, conversation.collected_data.language)
             break
         }
 
@@ -1098,7 +1209,7 @@ export async function processConversationTurn(
                 }
 
                 logLlmMerge(stepTrace, fieldsUpdated, fieldsSkipped, 'ambiguous_group', 'validation_failed_missing_budget')
-                response = STEP_PROMPTS[conversation.step]
+                response = getPrompt(conversation.step, conversation.collected_data.language)
                 decisionReason = 'validation_failed_missing_budget'
                 buffer.budget_min = null
                 buffer.budget_max = null
@@ -1124,7 +1235,7 @@ export async function processConversationTurn(
             decisionReason = fieldsSkipped.some((entry) => entry.includes('ambiguous_group'))
                 ? 'validation_failed_ambiguous_budget'
                 : 'budget_normalized_success'
-            response = STEP_PROMPTS[conversation.step]
+            response = getPrompt(conversation.step, conversation.collected_data.language)
             break
         }
 
@@ -1134,7 +1245,18 @@ export async function processConversationTurn(
                 conversation.step = getForwardStep(currentStep, conversation.collected_data)
                 nextStep = conversation.step
                 decisionReason = 'property_type_inferred_from_bhk'
-                response = STEP_PROMPTS[conversation.step]
+                response = getPrompt(conversation.step, conversation.collected_data.language)
+                break
+            }
+
+            if (isOtherOrNotSureInput(rawTrimmed)) {
+                resetRetryCount(runtimeState, conversation.step)
+                delete conversation.collected_data.property_type
+                delete conversation.collected_data.bhk
+                conversation.step = getForwardStep(currentStep, conversation.collected_data)
+                nextStep = conversation.step
+                decisionReason = 'property_type_skipped_not_sure'
+                response = getPrompt(conversation.step, conversation.collected_data.language)
                 break
             }
 
@@ -1162,7 +1284,7 @@ export async function processConversationTurn(
                     decisionReason = 'validation_failed_missing_property_type'
                 }
 
-                response = STEP_PROMPTS[conversation.step]
+                response = getPrompt(conversation.step, conversation.collected_data.language)
                 break
             }
 
@@ -1171,19 +1293,37 @@ export async function processConversationTurn(
             conversation.step = getForwardStep(currentStep, conversation.collected_data)
             nextStep = conversation.step
             decisionReason = 'property_type_normalized_success'
-            response = STEP_PROMPTS[conversation.step]
+            response = getPrompt(conversation.step, conversation.collected_data.language)
             break
         }
 
         case ChatStep.ASK_CONFIG: {
             const stepTrace = traceFor(conversation.step)
 
+            if (conversation.collected_data.property_type !== 'apartment' && conversation.collected_data.property_type !== 'villa') {
+                conversation.step = getForwardStep(currentStep, conversation.collected_data)
+                nextStep = conversation.step
+                decisionReason = 'config_skipped_non_residential'
+                response = getPrompt(conversation.step, conversation.collected_data.language)
+                break
+            }
+
             if (conversation.collected_data.bhk) {
                 logTrace(stepTrace, 'config_already_collected', 'info', { bhk: conversation.collected_data.bhk }, 'config_already_collected')
                 conversation.step = getForwardStep(currentStep, conversation.collected_data)
                 nextStep = conversation.step
                 decisionReason = 'config_already_collected'
-                response = STEP_PROMPTS[conversation.step]
+                response = getPrompt(conversation.step, conversation.collected_data.language)
+                break
+            }
+
+            if (isOtherOrNotSureInput(rawTrimmed)) {
+                resetRetryCount(runtimeState, conversation.step)
+                delete conversation.collected_data.bhk
+                conversation.step = getForwardStep(currentStep, conversation.collected_data)
+                nextStep = conversation.step
+                decisionReason = 'config_skipped_not_sure'
+                response = getPrompt(conversation.step, conversation.collected_data.language)
                 break
             }
 
@@ -1192,7 +1332,7 @@ export async function processConversationTurn(
             conversation.step = getForwardStep(currentStep, conversation.collected_data)
             nextStep = conversation.step
             decisionReason = 'config_captured'
-            response = STEP_PROMPTS[conversation.step]
+            response = getPrompt(conversation.step, conversation.collected_data.language)
             break
         }
 
@@ -1218,12 +1358,12 @@ export async function processConversationTurn(
                     conversation.step = ChatStep.SHOW_RESULTS
                     nextStep = conversation.step
                     decisionReason = 'fallback_triggered_retry_limit'
-                    response = STEP_PROMPTS[conversation.step]
+                    response = getPrompt(conversation.step, conversation.collected_data.language)
                     break
                 }
 
                 decisionReason = 'validation_failed_missing_timeline'
-                response = STEP_PROMPTS[conversation.step]
+                response = getPrompt(conversation.step, conversation.collected_data.language)
                 break
             }
 
@@ -1232,7 +1372,7 @@ export async function processConversationTurn(
             conversation.step = getForwardStep(currentStep, conversation.collected_data)
             nextStep = conversation.step
             decisionReason = 'timeline_normalized_success'
-            response = STEP_PROMPTS[conversation.step]
+            response = getPrompt(conversation.step, conversation.collected_data.language)
             break
         }
 
@@ -1252,21 +1392,33 @@ export async function processConversationTurn(
             const count = properties.length
             fallbackTriggered = fallbackTriggered || count === 0
 
-            // Build response message with location context
-            let message: string
+            const location = isValidLocation(conversation.collected_data.location)
+                ? conversation.collected_data.location
+                : null
+
             if (count === 0) {
-                message = 'No exact matches found, but the agent can help you further.'
+                response = getNoResultsActionPrompt(
+                    conversation.collected_data.language,
+                    location,
+                )
                 decisionReason = 'property_query_no_results'
-            } else if (isValidLocation(conversation.collected_data.location)) {
-                message = `Great! I found ${count} properties in ${conversation.collected_data.location} matching your criteria.`
-                decisionReason = 'property_query_success_with_location'
+                conversation.step = ChatStep.ASK_NO_RESULTS_ACTION
             } else {
-                message = `Great! I found ${count} properties matching your criteria.`
-                decisionReason = 'property_query_success'
+                response = getResultsSummaryPrompt(
+                    count,
+                    conversation.collected_data.language,
+                    location,
+                )
+
+                if (location) {
+                    decisionReason = 'property_query_success_with_location'
+                } else {
+                    decisionReason = 'property_query_success'
+                }
+
+                conversation.step = ChatStep.CAPTURE_NAME
             }
 
-            response = message
-            conversation.step = getForwardStep(currentStep, conversation.collected_data)
             nextStep = conversation.step
 
             appendMessageOnce(conversation, {
@@ -1311,6 +1463,102 @@ export async function processConversationTurn(
             }
         }
 
+        case ChatStep.ASK_NO_RESULTS_ACTION: {
+            const stepTrace = traceFor(conversation.step)
+            const location = isValidLocation(conversation.collected_data.location)
+                ? conversation.collected_data.location
+                : null
+            const wantsAvailableOptions = isSeeAvailableOptionsIntent(rawTrimmed)
+            const wantsAgent = isAgentHandoffIntent(rawTrimmed) || isLocalizedAgentIntent(rawTrimmed)
+
+            if (wantsAvailableOptions) {
+                const derivedPropertyType: PropertyType | undefined = conversation.collected_data.property_type
+                    ?? (conversation.collected_data.bhk ? 'apartment' : undefined)
+                const relaxedFilters: PropertyFilter = {
+                    location,
+                    property_type: derivedPropertyType,
+                    bhk: conversation.collected_data.bhk,
+                }
+
+                const availableOptions = await getMatchingProperties(relaxedFilters, conversation.session_id, stepTrace)
+                const normalizedLocation = location?.trim().toLowerCase()
+                const strictAreaOptions = normalizedLocation
+                    ? availableOptions.filter((property) => property.location.toLowerCase().includes(normalizedLocation))
+                    : availableOptions
+
+                properties = strictAreaOptions.slice(0, 5)
+                if (properties.length === 0) {
+                    conversation.step = ChatStep.CAPTURE_NAME
+                    nextStep = conversation.step
+                    decisionReason = 'no_results_available_options_empty'
+                    response = getPrompt(ChatStep.CAPTURE_NAME, conversation.collected_data.language)
+                    break
+                }
+
+                response = getResultsSummaryPrompt(
+                    properties.length,
+                    conversation.collected_data.language,
+                    location,
+                )
+                conversation.step = ChatStep.CAPTURE_NAME
+                nextStep = conversation.step
+                decisionReason = 'no_results_available_options_shown'
+
+                appendMessageOnce(conversation, {
+                    role: 'bot',
+                    content: response,
+                    timestamp: nowIso(),
+                })
+
+                logTrace(
+                    stepTrace,
+                    'step_transition',
+                    'info',
+                    {
+                        currentStep: ChatStep.ASK_NO_RESULTS_ACTION,
+                        nextStep: conversation.step,
+                        collectedData: conversation.collected_data,
+                        count: properties.length,
+                        filters: relaxedFilters,
+                    },
+                    decisionReason,
+                )
+
+                response = await formatResponseWithLlm(conversation, ChatStep.SHOW_RESULTS, response, stepTrace)
+                llmUsed = true
+
+                return {
+                    response,
+                    requiresEscalation: false,
+                    isCompleted: false,
+                    properties,
+                    requestId: context.requestId,
+                    debug: createDebugInfo(
+                        initialStep,
+                        nextStep,
+                        conversation.collected_data,
+                        llmUsed,
+                        fallbackTriggered,
+                        decisionReason,
+                        rejectedFields,
+                        getRetryCount(runtimeState, initialStep),
+                    ),
+                }
+            }
+
+            if (wantsAgent) {
+                conversation.step = ChatStep.CAPTURE_NAME
+                nextStep = conversation.step
+                decisionReason = 'no_results_agent_selected'
+                response = getPrompt(ChatStep.CAPTURE_NAME, conversation.collected_data.language)
+                break
+            }
+
+            decisionReason = 'no_results_action_reprompt'
+            response = getNoResultsActionPrompt(conversation.collected_data.language, location)
+            break
+        }
+
         case ChatStep.CAPTURE_NAME: {
             const stepTrace = traceFor(conversation.step)
 
@@ -1320,7 +1568,7 @@ export async function processConversationTurn(
                 decisionReason = decisionReason === 'agent_handoff_requested'
                     ? decisionReason
                     : 'agent_handoff_confirmed_request_name'
-                response = STEP_PROMPTS[ChatStep.CAPTURE_NAME]
+                response = getPrompt(ChatStep.CAPTURE_NAME, conversation.collected_data.language)
                 break
             }
 
@@ -1354,12 +1602,12 @@ export async function processConversationTurn(
                     nextStep = conversation.step
                     decisionReason = 'fallback_triggered_retry_limit'
                     buffer.name = null
-                    response = STEP_PROMPTS[conversation.step]
+                    response = getPrompt(conversation.step, conversation.collected_data.language)
                     break
                 }
 
                 logLlmMerge(stepTrace, fieldsUpdated, fieldsSkipped, 'sanity_check_failed', 'validation_failed_missing_name')
-                response = STEP_PROMPTS[conversation.step]
+                response = getPrompt(conversation.step, conversation.collected_data.language)
                 decisionReason = 'validation_failed_missing_name'
                 buffer.name = null
                 break
@@ -1373,7 +1621,7 @@ export async function processConversationTurn(
             conversation.step = getForwardStep(currentStep, conversation.collected_data)
             nextStep = conversation.step
             decisionReason = 'name_normalized_success'
-            response = STEP_PROMPTS[conversation.step]
+            response = getPrompt(conversation.step, conversation.collected_data.language)
             break
         }
 
@@ -1384,7 +1632,7 @@ export async function processConversationTurn(
                 resetRetryCount(runtimeState, conversation.step)
                 nextStep = conversation.step
                 decisionReason = 'agent_handoff_confirmed_request_phone'
-                response = STEP_PROMPTS[ChatStep.CAPTURE_PHONE]
+                response = getPrompt(ChatStep.CAPTURE_PHONE, conversation.collected_data.language)
                 break
             }
 
@@ -1418,21 +1666,19 @@ export async function processConversationTurn(
                     nextStep = conversation.step
                     decisionReason = 'fallback_triggered_retry_limit'
                     buffer.phone = null
-                    response = STEP_PROMPTS[conversation.step]
+                    response = getPrompt(conversation.step, conversation.collected_data.language)
                     break
                 }
 
                 logLlmMerge(stepTrace, fieldsUpdated, fieldsSkipped, 'sanity_check_failed', 'validation_failed_missing_phone')
-                response = STEP_PROMPTS[conversation.step]
+                response = getPrompt(conversation.step, conversation.collected_data.language)
                 decisionReason = 'validation_failed_missing_phone'
                 buffer.phone = null
                 break
             }
 
             resetRetryCount(runtimeState, conversation.step)
-            const firstPhoneCaptureInSession = !conversation.collected_data.phone
             conversation.collected_data.phone = phone
-            conversation.collected_data.status = 'new'
             fieldsUpdated.push('phone')
             buffer.phone = null
             logLlmMerge(stepTrace, fieldsUpdated, fieldsSkipped, 'null', 'phone_normalized_success')
@@ -1474,7 +1720,7 @@ export async function processConversationTurn(
                         },
                         'lead_persistence_failed',
                     )
-                    response = STEP_PROMPTS[conversation.step]
+                    response = getPrompt(conversation.step, conversation.collected_data.language)
                     decisionReason = 'lead_persistence_failed'
                     break
                 }
@@ -1494,26 +1740,47 @@ export async function processConversationTurn(
                 )
             }
 
-            const alreadyEscalated = hasEscalatedPhoneInSession(conversation.session_id, phone)
-            const shouldEscalate = !alreadyEscalated && (leadResult.action === 'created' || firstPhoneCaptureInSession)
+            conversation.collected_data.status = leadResult.lead.escalation_triggered
+                ? 'escalated'
+                : (leadResult.lead.status ?? 'new')
 
-            if (shouldEscalate) {
+            const alreadyEscalatedPersisted = leadResult.lead.escalation_triggered === true
+                || leadResult.lead.status === 'escalated'
+            const shouldNotify = !alreadyEscalatedPersisted
+            let notificationDelivered = false
+
+            if (shouldNotify) {
                 try {
-                    const escalationPayload = buildEscalationPayload(leadResult.lead)
-                    await notifyAgent(escalationPayload)
-                    markEscalatedPhoneInSession(conversation.session_id, phone)
-                    conversation.collected_data.status = 'escalated'
+                    const notifyResult = await notifyAgent(leadResult.lead, stepTrace)
+                    notificationDelivered = notifyResult.delivered
 
-                    logTrace(
-                        stepTrace,
-                        'escalation_triggered',
-                        'info',
-                        {
-                            leadId: leadResult.lead.id,
-                            channel: 'stub',
-                        },
-                        'escalation_triggered',
-                    )
+                    if (notificationDelivered) {
+                        leadResult.lead = await markLeadEscalationTriggered(leadResult.lead.id, stepTrace)
+                        conversation.collected_data.status = 'escalated'
+
+                        logTrace(
+                            stepTrace,
+                            'escalation_triggered',
+                            'info',
+                            {
+                                leadId: leadResult.lead.id,
+                                channels: notifyResult.channels,
+                            },
+                            'escalation_triggered',
+                        )
+                    } else {
+                        logTrace(
+                            stepTrace,
+                            'escalation_failed',
+                            'warn',
+                            {
+                                leadId: leadResult.lead.id,
+                                reason: 'no_channel_delivered',
+                                channels: notifyResult.channels,
+                            },
+                            'escalation_failed_no_channel_delivered',
+                        )
+                    }
                 } catch (notifyError) {
                     logTrace(
                         stepTrace,
@@ -1527,12 +1794,13 @@ export async function processConversationTurn(
                     )
                 }
             } else {
+                conversation.collected_data.status = 'escalated'
                 logTrace(
                     stepTrace,
                     'escalation_skipped',
                     'warn',
                     {
-                        phone: `******${phone.slice(-4)}`,
+                        leadId: leadResult.lead.id,
                         reason: 'duplicate_prevention',
                     },
                     'escalation_skipped_duplicate_prevention',
@@ -1541,8 +1809,18 @@ export async function processConversationTurn(
 
             conversation.step = getForwardStep(currentStep, conversation.collected_data)
             nextStep = conversation.step
-            decisionReason = leadResult.action === 'created' ? 'lead_created_and_escalated' : 'lead_updated_and_completed'
-            response = STEP_PROMPTS[conversation.step]
+            if (notificationDelivered) {
+                decisionReason = leadResult.action === 'created' ? 'lead_created_and_escalated' : 'lead_updated_and_escalated'
+            } else if (!shouldNotify) {
+                decisionReason = leadResult.action === 'created'
+                    ? 'lead_created_escalation_skipped_duplicate'
+                    : 'lead_updated_escalation_skipped_duplicate'
+            } else {
+                decisionReason = leadResult.action === 'created'
+                    ? 'lead_created_escalation_failed'
+                    : 'lead_updated_escalation_failed'
+            }
+            response = getPrompt(conversation.step, conversation.collected_data.language)
             break
         }
 
@@ -1553,18 +1831,18 @@ export async function processConversationTurn(
             nextStep = conversation.step
             decisionReason = 'manual_escalation_handled'
             logTrace(stepTrace, 'escalation_triggered', 'info', { channel: 'stub' }, 'manual_escalation_handled')
-            response = STEP_PROMPTS[ChatStep.ESCALATE]
+            response = getPrompt(ChatStep.ESCALATE, conversation.collected_data.language)
             break
         }
 
         case ChatStep.DONE: {
             decisionReason = 'conversation_completed'
-            response = STEP_PROMPTS[ChatStep.DONE]
+            response = getPrompt(ChatStep.DONE, conversation.collected_data.language)
             break
         }
 
         default: {
-            response = STEP_PROMPTS[ChatStep.ASK_INTENT]
+            response = getPrompt(ChatStep.ASK_LANGUAGE, conversation.collected_data.language)
             break
         }
     }

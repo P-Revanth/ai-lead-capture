@@ -1,10 +1,13 @@
 import { supabase } from '@/lib/supabaseClient'
+import { Intent } from '@/types/chat'
 
 const CACHE_TTL_MS = 5 * 60 * 1000
 const MAX_OPTIONS = 5
 const DEFAULT_LIMIT = 4
 const LOCATION_PAGE_SIZE = 1000
 const RANGE_ROUNDING_UNIT = 500000
+
+type SearchIntent = Intent
 
 const LOCATION_ALIASES: Record<string, string> = {
     vizag: 'visakhapatnam',
@@ -62,6 +65,13 @@ export const FALLBACK_BUDGET_RANGES: BudgetRangeSuggestion[] = [
     { value: 'above_10000000', label: 'Above Rs 1Cr', min: 10000000, max: null },
 ]
 
+export const FALLBACK_RENT_BUDGET_RANGES: BudgetRangeSuggestion[] = [
+    { value: 'under_15000', label: 'Under Rs 15,000', min: null, max: 15000 },
+    { value: '15000_30000', label: 'Rs 15,000 - Rs 30,000', min: 15000, max: 30000 },
+    { value: '30000_60000', label: 'Rs 30,000 - Rs 60,000', min: 30000, max: 60000 },
+    { value: 'above_60000', label: 'Above Rs 60,000', min: 60000, max: null },
+]
+
 export const FALLBACK_PROPERTY_TYPES: SuggestionOption[] = [
     { value: 'apartment', label: 'Apartment' },
     { value: 'villa', label: 'Villa' },
@@ -75,6 +85,38 @@ export const FALLBACK_BHK_OPTIONS: SuggestionOption[] = [
     { value: '3BHK', label: '3BHK' },
     { value: '4BHK', label: '4BHK' },
 ]
+
+function normalizeIntent(intent?: string | null): SearchIntent {
+    const normalized = (intent ?? '').trim().toLowerCase()
+    if (normalized === 'rent' || normalized === 'explore') {
+        return normalized as SearchIntent
+    }
+
+    return 'buy'
+}
+
+function getFallbackBudgetRanges(intent: SearchIntent, limit: number): BudgetRangeSuggestion[] {
+    if (intent === 'rent') {
+        return FALLBACK_RENT_BUDGET_RANGES.slice(0, limit)
+    }
+
+    return FALLBACK_BUDGET_RANGES.slice(0, limit)
+}
+
+function applyRentIntentFilter<T>(query: T, intent: SearchIntent): T {
+    if (intent !== 'rent') {
+        return query
+    }
+
+    const queryWithOr = query as T & { or?: (filters: string) => T }
+    if (typeof queryWithOr.or !== 'function') {
+        return query
+    }
+
+    return queryWithOr.or(
+        'status.ilike.%rent%,status.ilike.%lease%,status.ilike.%month%,title.ilike.%rent%,title.ilike.%lease%,description.ilike.%rent%,description.ilike.%lease%,description.ilike.%month%',
+    )
+}
 
 interface CacheEntry<T> {
     value: T
@@ -289,16 +331,21 @@ function parseBhkRank(value: string): number {
     return Number(match[0])
 }
 
-async function fetchAllAvailableLocations(): Promise<Array<{ location: string }>> {
+async function fetchAllAvailableLocations(intent: SearchIntent): Promise<Array<{ location: string }>> {
     const rows: Array<{ location: string }> = []
     let offset = 0
 
     while (true) {
-        const { data, error } = await supabase
-            .from('properties')
-            .select('location')
-            .eq('is_available', true)
-            .range(offset, offset + LOCATION_PAGE_SIZE - 1)
+        const query = applyRentIntentFilter(
+            supabase
+                .from('properties')
+                .select('location')
+                .eq('is_available', true)
+                .range(offset, offset + LOCATION_PAGE_SIZE - 1),
+            intent,
+        )
+
+        const { data, error } = await query
 
         if (error) {
             throw new Error(`Failed to fetch locations: ${error.message}`)
@@ -327,11 +374,12 @@ async function fetchAllAvailableLocations(): Promise<Array<{ location: string }>
 
 export async function getTopLocations(limit = DEFAULT_LIMIT): Promise<LocationSuggestion[]> {
     const normalizedLimit = clampLimit(limit)
-    const cacheKey = getCacheKey('top_locations', [normalizedLimit])
+    const intent = 'buy'
+    const cacheKey = getCacheKey('top_locations', [intent, normalizedLimit])
 
     return withCache(cacheKey, async () => {
         try {
-            const rows = await fetchAllAvailableLocations()
+            const rows = await fetchAllAvailableLocations(intent)
             const counts = new Map<string, { count: number; label: string }>()
 
             for (const row of rows) {
@@ -363,31 +411,81 @@ export async function getTopLocations(limit = DEFAULT_LIMIT): Promise<LocationSu
     })
 }
 
-export async function getBudgetRanges(location: string, limit = DEFAULT_LIMIT): Promise<BudgetRangeSuggestion[]> {
+export async function getTopLocationsByIntent(intentInput: string | null | undefined, limit = DEFAULT_LIMIT): Promise<LocationSuggestion[]> {
     const normalizedLimit = clampLimit(limit)
+    const intent = normalizeIntent(intentInput)
+    const cacheKey = getCacheKey('top_locations', [intent, normalizedLimit])
+
+    return withCache(cacheKey, async () => {
+        try {
+            const rows = await fetchAllAvailableLocations(intent)
+            const counts = new Map<string, { count: number; label: string }>()
+
+            for (const row of rows) {
+                const normalized = normalizeLocation(row.location)
+                const existing = counts.get(normalized)
+                if (existing) {
+                    existing.count += 1
+                    continue
+                }
+
+                counts.set(normalized, {
+                    count: 1,
+                    label: toTitleCase(normalized),
+                })
+            }
+
+            const ranked = [...counts.entries()]
+                .map(([value, payload]) => ({ value, label: payload.label, count: payload.count }))
+                .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label))
+
+            if (ranked.length === 0) {
+                return FALLBACK_LOCATIONS.slice(0, normalizedLimit)
+            }
+
+            return ranked.slice(0, normalizedLimit)
+        } catch {
+            return FALLBACK_LOCATIONS.slice(0, normalizedLimit)
+        }
+    })
+}
+
+export async function getBudgetRanges(
+    location: string,
+    limit = DEFAULT_LIMIT,
+    intentInput?: string | null,
+): Promise<BudgetRangeSuggestion[]> {
+    const normalizedLimit = clampLimit(limit)
+    const intent = normalizeIntent(intentInput)
 
     if (!isValidInputLocation(location)) {
-        return FALLBACK_BUDGET_RANGES.slice(0, normalizedLimit)
+        return getFallbackBudgetRanges(intent, normalizedLimit)
     }
 
     const normalizedLocation = normalizeLocation(location)
-    const cacheKey = getCacheKey('budget_ranges', [normalizedLocation, normalizedLimit])
+    const cacheKey = getCacheKey('budget_ranges', [normalizedLocation, intent, normalizedLimit])
 
     return withCache(cacheKey, async () => {
         try {
             const [minResponse, maxResponse] = await Promise.all([
-                supabase
-                    .from('properties')
-                    .select('price')
-                    .eq('is_available', true)
-                    .ilike('location', normalizedLocation)
+                applyRentIntentFilter(
+                    supabase
+                        .from('properties')
+                        .select('price')
+                        .eq('is_available', true)
+                        .ilike('location', `%${normalizedLocation}%`),
+                    intent,
+                )
                     .order('price', { ascending: true })
                     .limit(1),
-                supabase
-                    .from('properties')
-                    .select('price')
-                    .eq('is_available', true)
-                    .ilike('location', normalizedLocation)
+                applyRentIntentFilter(
+                    supabase
+                        .from('properties')
+                        .select('price')
+                        .eq('is_available', true)
+                        .ilike('location', `%${normalizedLocation}%`),
+                    intent,
+                )
                     .order('price', { ascending: false })
                     .limit(1),
             ])
@@ -404,17 +502,17 @@ export async function getBudgetRanges(location: string, limit = DEFAULT_LIMIT): 
             const maxPrice = maxResponse.data?.[0]?.price
 
             if (typeof minPrice !== 'number' || typeof maxPrice !== 'number') {
-                return FALLBACK_BUDGET_RANGES.slice(0, normalizedLimit)
+                return getFallbackBudgetRanges(intent, normalizedLimit)
             }
 
             const dynamicRanges = buildBudgetRanges(minPrice, maxPrice, normalizedLimit)
             if (dynamicRanges.length === 0) {
-                return FALLBACK_BUDGET_RANGES.slice(0, normalizedLimit)
+                return getFallbackBudgetRanges(intent, normalizedLimit)
             }
 
             return dynamicRanges
         } catch {
-            return FALLBACK_BUDGET_RANGES.slice(0, normalizedLimit)
+            return getFallbackBudgetRanges(intent, normalizedLimit)
         }
     })
 }
@@ -423,8 +521,10 @@ export async function getPropertyTypes(
     location: string,
     budget?: BudgetFilter,
     limit = DEFAULT_LIMIT,
+    intentInput?: string | null,
 ): Promise<SuggestionOption[]> {
     const normalizedLimit = clampLimit(limit)
+    const intent = normalizeIntent(intentInput)
 
     if (!isValidInputLocation(location)) {
         return FALLBACK_PROPERTY_TYPES.slice(0, normalizedLimit)
@@ -433,16 +533,19 @@ export async function getPropertyTypes(
     const normalizedLocation = normalizeLocation(location)
     const min = typeof budget?.min === 'number' ? budget.min : null
     const max = typeof budget?.max === 'number' ? budget.max : null
-    const cacheKey = getCacheKey('property_types', [normalizedLocation, min, max, normalizedLimit])
+    const cacheKey = getCacheKey('property_types', [normalizedLocation, min, max, intent, normalizedLimit])
 
     return withCache(cacheKey, async () => {
         try {
-            let query = supabase
-                .from('properties')
-                .select('type')
-                .eq('is_available', true)
-                .ilike('location', normalizedLocation)
-                .not('type', 'is', null)
+            let query = applyRentIntentFilter(
+                supabase
+                    .from('properties')
+                    .select('type')
+                    .eq('is_available', true)
+                    .ilike('location', `%${normalizedLocation}%`)
+                    .not('type', 'is', null),
+                intent,
+            )
 
             if (typeof min === 'number') {
                 query = query.gte('price', min)
@@ -485,6 +588,7 @@ export async function getPropertyTypes(
 
 export async function getBHKOptions(location: string, type: string, limit = DEFAULT_LIMIT): Promise<SuggestionOption[]> {
     const normalizedLimit = clampLimit(limit)
+    const intent = 'buy'
 
     if (!isValidInputLocation(location) || type.trim().length === 0) {
         return FALLBACK_BHK_OPTIONS.slice(0, normalizedLimit)
@@ -492,17 +596,80 @@ export async function getBHKOptions(location: string, type: string, limit = DEFA
 
     const normalizedLocation = normalizeLocation(location)
     const normalizedType = normalizePropertyType(type) ?? type.trim().toLowerCase()
-    const cacheKey = getCacheKey('bhk_options', [normalizedLocation, normalizedType, normalizedLimit])
+    const cacheKey = getCacheKey('bhk_options', [normalizedLocation, normalizedType, intent, normalizedLimit])
 
     return withCache(cacheKey, async () => {
         try {
-            const { data, error } = await supabase
-                .from('properties')
-                .select('bhk')
-                .eq('is_available', true)
-                .ilike('location', normalizedLocation)
-                .ilike('type', normalizedType)
-                .not('bhk', 'is', null)
+            const { data, error } = await applyRentIntentFilter(
+                supabase
+                    .from('properties')
+                    .select('bhk')
+                    .eq('is_available', true)
+                    .ilike('location', `%${normalizedLocation}%`)
+                    .ilike('type', normalizedType)
+                    .not('bhk', 'is', null),
+                intent,
+            )
+                .limit(250)
+
+            if (error) {
+                throw new Error(`Failed to fetch BHK options: ${error.message}`)
+            }
+
+            const unique = new Set<string>()
+            for (const row of data ?? []) {
+                const value = typeof row.bhk === 'string' ? normalizeBHK(row.bhk) : ''
+                if (!value) {
+                    continue
+                }
+
+                unique.add(value)
+            }
+
+            const options = [...unique]
+                .sort((left, right) => parseBhkRank(left) - parseBhkRank(right) || left.localeCompare(right))
+                .map((value) => ({ value, label: value }))
+
+            if (options.length === 0) {
+                return FALLBACK_BHK_OPTIONS.slice(0, normalizedLimit)
+            }
+
+            return options.slice(0, normalizedLimit)
+        } catch {
+            return FALLBACK_BHK_OPTIONS.slice(0, normalizedLimit)
+        }
+    })
+}
+
+export async function getBHKOptionsByIntent(
+    location: string,
+    type: string,
+    limit = DEFAULT_LIMIT,
+    intentInput?: string | null,
+): Promise<SuggestionOption[]> {
+    const normalizedLimit = clampLimit(limit)
+    const intent = normalizeIntent(intentInput)
+
+    if (!isValidInputLocation(location) || type.trim().length === 0) {
+        return FALLBACK_BHK_OPTIONS.slice(0, normalizedLimit)
+    }
+
+    const normalizedLocation = normalizeLocation(location)
+    const normalizedType = normalizePropertyType(type) ?? type.trim().toLowerCase()
+    const cacheKey = getCacheKey('bhk_options', [normalizedLocation, normalizedType, intent, normalizedLimit])
+
+    return withCache(cacheKey, async () => {
+        try {
+            const { data, error } = await applyRentIntentFilter(
+                supabase
+                    .from('properties')
+                    .select('bhk')
+                    .eq('is_available', true)
+                    .ilike('location', `%${normalizedLocation}%`)
+                    .ilike('type', normalizedType)
+                    .not('bhk', 'is', null),
+                intent,
+            )
                 .limit(250)
 
             if (error) {

@@ -46,6 +46,8 @@ const STEP_ORDER: ChatStep[] = [
     ChatStep.ASK_NO_RESULTS_ACTION,
     ChatStep.CAPTURE_NAME,
     ChatStep.CAPTURE_PHONE,
+    ChatStep.ASK_VISIT_DATE,
+    ChatStep.ASK_VISIT_TIME,
     ChatStep.ESCALATE,
     ChatStep.DONE,
 ]
@@ -66,6 +68,9 @@ const STRICT_PROMPT_STEPS = new Set<ChatStep>([
     ChatStep.SHOW_RESULTS,
     ChatStep.CAPTURE_NAME,
     ChatStep.CAPTURE_PHONE,
+    ChatStep.ASK_VISIT_DATE,
+    ChatStep.ASK_VISIT_TIME,
+    ChatStep.DONE,
 ])
 const EXTRACTION_BUFFER = new Map<string, ExtractedEntities>()
 const VALID_EXTRACTION_STEP_TRACKER = new Map<string, Set<ChatStep>>()
@@ -243,6 +248,10 @@ function hasRequiredFieldCollected(step: ChatStep, collectedData: CollectedData)
             return !!collectedData.name && collectedData.name.trim().length > 0
         case ChatStep.CAPTURE_PHONE:
             return !!collectedData.phone && collectedData.phone.trim().length > 0
+        case ChatStep.ASK_VISIT_DATE:
+            return !!collectedData.visit_date && collectedData.visit_date.trim().length > 0
+        case ChatStep.ASK_VISIT_TIME:
+            return !!collectedData.visit_time && collectedData.visit_time.trim().length > 0
         default:
             return false
     }
@@ -378,6 +387,27 @@ function parseDbTimestampToMs(value: string): number {
     return new Date(normalized).getTime()
 }
 
+function clearSessionRuntimeState(sessionId: string): void {
+    EXTRACTION_BUFFER.delete(sessionId)
+    VALID_EXTRACTION_STEP_TRACKER.delete(sessionId)
+    REQUEST_RUNTIME_STATE.delete(sessionId)
+}
+
+function createExpiredConversation(row: ConversationRow, fallbackSessionId: string): ConversationRecord {
+    const resolvedSessionId = String(row.session_id ?? fallbackSessionId)
+    clearSessionRuntimeState(resolvedSessionId)
+
+    return {
+        id: String(row.id),
+        session_id: resolvedSessionId,
+        messages: [],
+        step: ChatStep.ASK_LANGUAGE,
+        collected_data: {},
+        // Refresh timestamp so expiry reset happens once, not on every subsequent request.
+        created_at: nowIso(),
+    }
+}
+
 function toChatStep(value: string | null | undefined): ChatStep {
     if (!value) {
         return ChatStep.ASK_LANGUAGE
@@ -447,12 +477,22 @@ function parseBudget(message: string): { min: number | null; max: number | null 
     const normalized = normalizeInput(message).replace(/,/g, '')
 
     const lakhPattern = /^(\d+)\s*(?:l|lakh)\s*(?:-|to)\s*(\d+)\s*(?:l|lakh)$/i
-    const rawPattern = /^(\d{5,})\s*(?:-|to)\s*(\d{5,})$/
+    const thousandPattern = /^(\d+(?:\.\d+)?)\s*(?:k|thousand)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\s*(?:k|thousand)$/i
+    const rawPattern = /^(\d{3,})\s*(?:-|to)\s*(\d{3,})$/
 
     const lakhMatch = normalized.match(lakhPattern)
     if (lakhMatch) {
         const left = Number(lakhMatch[1]) * 100000
         const right = Number(lakhMatch[2]) * 100000
+        const min = Math.min(left, right)
+        const max = Math.max(left, right)
+        return { min, max }
+    }
+
+    const thousandMatch = normalized.match(thousandPattern)
+    if (thousandMatch) {
+        const left = Math.round(Number(thousandMatch[1]) * 1000)
+        const right = Math.round(Number(thousandMatch[2]) * 1000)
         const min = Math.min(left, right)
         const max = Math.max(left, right)
         return { min, max }
@@ -511,11 +551,227 @@ function isOtherOrNotSureInput(message: string): boolean {
 
 function normalizeIndianPhone(input: string): string | null {
     const digits = input.replace(/\D/g, '')
-    const localDigits = digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits
+    let localDigits = digits
+
+    if (digits.length === 12 && digits.startsWith('91')) {
+        localDigits = digits.slice(2)
+    } else if (digits.length === 11 && digits.startsWith('0')) {
+        localDigits = digits.slice(1)
+    } else if (digits.length === 13 && digits.startsWith('091')) {
+        localDigits = digits.slice(3)
+    }
+
     if (!/^[6-9][0-9]{9}$/.test(localDigits)) {
         return null
     }
     return localDigits
+}
+
+function toIsoDate(value: Date): string {
+    const year = value.getFullYear()
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+}
+
+function startOfDay(value: Date): Date {
+    return new Date(value.getFullYear(), value.getMonth(), value.getDate())
+}
+
+function addDays(value: Date, days: number): Date {
+    const result = new Date(value)
+    result.setDate(result.getDate() + days)
+    return result
+}
+
+function nextSaturday(value: Date): Date {
+    const day = value.getDay()
+    const delta = day === 6 ? 0 : ((6 - day + 7) % 7)
+    return addDays(value, delta)
+}
+
+function nextWeekendSaturday(value: Date): Date {
+    return addDays(nextSaturday(value), 7)
+}
+
+function parseVisitDateInput(message: string): string | null {
+    const normalized = normalizeInput(message)
+    if (!normalized) {
+        return null
+    }
+
+    const today = startOfDay(new Date())
+
+    if (/(^|\b)today(\b|$)/.test(normalized) || /ఈరోజు/u.test(message) || /आज/u.test(message)) {
+        return toIsoDate(today)
+    }
+
+    if (/(^|\b)tomorrow(\b|$)/.test(normalized) || /రేపు/u.test(message) || /कल/u.test(message)) {
+        return toIsoDate(addDays(today, 1))
+    }
+
+    if (
+        /(in\s*2\s*days|2\s*days|day\s+after\s+tomorrow)/.test(normalized)
+        || /ఎల్లుండి|2\s*రోజులు|2\s*రోజుల్లో/u.test(message)
+        || /परसों|2\s*दिन/u.test(message)
+    ) {
+        return toIsoDate(addDays(today, 2))
+    }
+
+    if (/(next\s+weekend)/.test(normalized) || /తదుపరి\s*వీకెండ్/u.test(message) || /अगले\s*वीकेंड/u.test(message)) {
+        return toIsoDate(nextWeekendSaturday(today))
+    }
+
+    if (/(this\s+weekend|weekend)/.test(normalized) || /వీకెండ్|వారాంతం/u.test(message) || /वीकेंड|सप्ताहांत/u.test(message)) {
+        return toIsoDate(nextSaturday(today))
+    }
+
+    const isoLike = normalized.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/)
+    if (!isoLike) {
+        return null
+    }
+
+    const year = Number(isoLike[1])
+    const month = Number(isoLike[2])
+    const day = Number(isoLike[3])
+
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+        return null
+    }
+
+    const parsed = new Date(year, month - 1, day)
+    if (
+        parsed.getFullYear() !== year
+        || parsed.getMonth() !== month - 1
+        || parsed.getDate() !== day
+    ) {
+        return null
+    }
+
+    return toIsoDate(parsed)
+}
+
+function isPickDateIntent(message: string): boolean {
+    const normalized = normalizeInput(message)
+    if (!normalized) {
+        return false
+    }
+
+    if (/(pick date|choose date|select date|custom date)/.test(normalized)) {
+        return true
+    }
+
+    if (/తేదీ ఎంచుకోండి/u.test(message)) {
+        return true
+    }
+
+    if (/तारीख चुनें/u.test(message)) {
+        return true
+    }
+
+    return false
+}
+
+function getVisitDateFormatPrompt(language?: string | null): string {
+    const normalizedLanguage = normalizeLanguage(language)
+
+    if (normalizedLanguage === 'te') {
+        return 'దయచేసి తేదీని YYYY-MM-DD ఫార్మాట్‌లో పంపండి (ఉదా: 2026-04-18).'
+    }
+
+    if (normalizedLanguage === 'hi') {
+        return 'कृपया तारीख YYYY-MM-DD फ़ॉर्मैट में भेजें (उदाहरण: 2026-04-18)।'
+    }
+
+    return 'Please share your preferred date in YYYY-MM-DD format (example: 2026-04-18).'
+}
+
+function toTwelveHourTime(hour24: number, minute: number): string {
+    const normalizedHour = ((hour24 % 24) + 24) % 24
+    const period = normalizedHour >= 12 ? 'PM' : 'AM'
+    const hour12 = normalizedHour % 12 === 0 ? 12 : normalizedHour % 12
+    return `${hour12}:${String(minute).padStart(2, '0')} ${period}`
+}
+
+function parseVisitTimeInput(message: string): string | null {
+    const normalized = normalizeInput(message)
+    if (!normalized) {
+        return null
+    }
+
+    if (/(^|\b)morning(\b|$)/.test(normalized) || /ఉదయం/u.test(message) || /सुबह/u.test(message)) {
+        return '10:00 AM'
+    }
+
+    if (/(^|\b)afternoon(\b|$)/.test(normalized) || /మధ్యాహ్నం/u.test(message) || /दोपहर/u.test(message)) {
+        return '2:00 PM'
+    }
+
+    if (/(^|\b)(evening|night)(\b|$)/.test(normalized) || /సాయంత్రం|రాత్రి/u.test(message) || /शाम|रात/u.test(message)) {
+        return '6:00 PM'
+    }
+
+    const twelveHourMatch = normalized.match(/(?:^|\b)(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\b|$)/i)
+    if (twelveHourMatch) {
+        const hour = Number(twelveHourMatch[1])
+        const minute = Number(twelveHourMatch[2] ?? '0')
+        const period = twelveHourMatch[3].toLowerCase()
+
+        if (hour >= 1 && hour <= 12 && minute >= 0 && minute <= 59) {
+            let hour24 = hour % 12
+            if (period === 'pm') {
+                hour24 += 12
+            }
+            return toTwelveHourTime(hour24, minute)
+        }
+    }
+
+    const twentyFourHourMatch = normalized.match(/(?:^|\b)(\d{1,2}):(\d{2})(?:\b|$)/)
+    if (twentyFourHourMatch) {
+        const hour = Number(twentyFourHourMatch[1])
+        const minute = Number(twentyFourHourMatch[2])
+
+        if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+            return toTwelveHourTime(hour, minute)
+        }
+    }
+
+    return null
+}
+
+function isPickTimeIntent(message: string): boolean {
+    const normalized = normalizeInput(message)
+    if (!normalized) {
+        return false
+    }
+
+    if (/(pick time|choose time|select time|custom time)/.test(normalized)) {
+        return true
+    }
+
+    if (/సమయం ఎంచుకోండి/u.test(message)) {
+        return true
+    }
+
+    if (/समय चुनें/u.test(message)) {
+        return true
+    }
+
+    return false
+}
+
+function getVisitTimeFormatPrompt(language?: string | null): string {
+    const normalizedLanguage = normalizeLanguage(language)
+
+    if (normalizedLanguage === 'te') {
+        return 'దయచేసి సమయాన్ని HH:MM AM/PM ఫార్మాట్‌లో పంపండి (ఉదా: 10:30 AM లేదా 6:00 PM).'
+    }
+
+    if (normalizedLanguage === 'hi') {
+        return 'कृपया समय HH:MM AM/PM फ़ॉर्मैट में भेजें (उदाहरण: 10:30 AM या 6:00 PM)।'
+    }
+
+    return 'Please share your preferred time in HH:MM AM/PM format (example: 10:30 AM or 6:00 PM).'
 }
 
 function isValidName(name: string): boolean {
@@ -619,6 +875,10 @@ function shouldSkipStep(step: ChatStep, data: CollectedData): boolean {
             return !!data.bhk || data.property_type === undefined || (data.property_type !== 'apartment' && data.property_type !== 'villa')
         case ChatStep.ASK_TIMELINE:
             return !!data.timeline
+        case ChatStep.ASK_VISIT_DATE:
+            return !!data.visit_date
+        case ChatStep.ASK_VISIT_TIME:
+            return !!data.visit_time
         default:
             return false
     }
@@ -706,14 +966,7 @@ export async function loadOrCreateConversation(sessionId: string): Promise<Conve
             const isExpired = Number.isFinite(createdAtMs) && Date.now() - createdAtMs > CONVERSATION_EXPIRY_MS
 
             if (isExpired) {
-                return {
-                    id: String(row.id),
-                    session_id: String(row.session_id ?? sessionId),
-                    messages: asMessages(row.messages),
-                    step: ChatStep.ASK_LANGUAGE,
-                    collected_data: {},
-                    created_at: createdAt,
-                }
+                return createExpiredConversation(row, sessionId)
             }
 
             return {
@@ -736,14 +989,7 @@ export async function loadOrCreateConversation(sessionId: string): Promise<Conve
         const isExpired = Number.isFinite(createdAtMs) && Date.now() - createdAtMs > CONVERSATION_EXPIRY_MS
 
         if (isExpired) {
-            return {
-                id: String(row.id),
-                session_id: String(row.session_id ?? sessionId),
-                messages: asMessages(row.messages),
-                step: ChatStep.ASK_LANGUAGE,
-                collected_data: {},
-                created_at: createdAt,
-            }
+            return createExpiredConversation(row, sessionId)
         }
 
         return {
@@ -792,6 +1038,7 @@ export async function saveConversation(conversation: ConversationRecord): Promis
         step: conversation.step,
         collected_data: toJson(conversation.collected_data),
         messages: toJson(conversation.messages),
+        created_at: conversation.created_at,
     }
 
     const { error } = await supabase.from('conversations').update(payload).eq('id', conversation.id)
@@ -1390,6 +1637,7 @@ export async function processConversationTurn(
             const derivedPropertyType: PropertyType | undefined = conversation.collected_data.property_type
                 ?? (conversation.collected_data.bhk ? 'apartment' : undefined)
             const filters: PropertyFilter = {
+                intent: conversation.collected_data.intent,
                 location: conversation.collected_data.location,
                 budget_min: conversation.collected_data.budget_min,
                 budget_max: conversation.collected_data.budget_max,
@@ -1484,6 +1732,7 @@ export async function processConversationTurn(
                 const derivedPropertyType: PropertyType | undefined = conversation.collected_data.property_type
                     ?? (conversation.collected_data.bhk ? 'apartment' : undefined)
                 const relaxedFilters: PropertyFilter = {
+                    intent: conversation.collected_data.intent,
                     location,
                     property_type: derivedPropertyType,
                     bhk: conversation.collected_data.bhk,
@@ -1652,8 +1901,9 @@ export async function processConversationTurn(
             const fieldsSkipped: string[] = []
             const repeatedInput = isRepeatedInput(runtimeState, conversation.step, normalized)
 
-            const candidatePhoneInput = buffer.phone ?? rawTrimmed
-            const phone = normalizeIndianPhone(candidatePhoneInput)
+            const extractedPhone = buffer.phone ? normalizeIndianPhone(buffer.phone) : null
+            const directPhone = normalizeIndianPhone(rawTrimmed)
+            const phone = extractedPhone ?? directPhone
             if (!phone) {
                 const retryCount = incrementRetryCount(runtimeState, conversation.step)
                 rejectedFields.push('phone')
@@ -1830,6 +2080,104 @@ export async function processConversationTurn(
                     : 'lead_updated_escalation_failed'
             }
             response = getPrompt(conversation.step, conversation.collected_data.language)
+            break
+        }
+
+        case ChatStep.ASK_VISIT_DATE: {
+            const stepTrace = traceFor(conversation.step)
+
+            if (isPickDateIntent(rawTrimmed)) {
+                resetRetryCount(runtimeState, conversation.step)
+                nextStep = conversation.step
+                decisionReason = 'visit_date_manual_entry_requested'
+                response = getVisitDateFormatPrompt(conversation.collected_data.language)
+                break
+            }
+
+            const visitDate = parseVisitDateInput(rawTrimmed)
+            if (!visitDate) {
+                const retryCount = incrementRetryCount(runtimeState, conversation.step)
+                rejectedFields.push('visit_date')
+                logTrace(
+                    stepTrace,
+                    'validation_failed',
+                    'warn',
+                    { reason: 'invalid_visit_date', retryCount },
+                    'validation_failed_missing_visit_date',
+                )
+
+                if (isRepeatedInput(runtimeState, conversation.step, normalized) || retryCount >= 2) {
+                    fallbackTriggered = true
+                    incrementMetric('step_stuck_count')
+                    logTrace(stepTrace, 'repeated_input_detected', 'warn', { input: normalized, retryCount }, 'repeated_input_detected')
+                    logTrace(stepTrace, 'step_stuck', 'warn', { retryCount, currentStep: conversation.step }, 'fallback_triggered_retry_limit')
+                    conversation.step = getFallbackStep(conversation.step)
+                    nextStep = conversation.step
+                    decisionReason = 'fallback_triggered_retry_limit'
+                    response = getPrompt(conversation.step, conversation.collected_data.language)
+                    break
+                }
+
+                decisionReason = 'validation_failed_missing_visit_date'
+                response = getPrompt(conversation.step, conversation.collected_data.language)
+                break
+            }
+
+            resetRetryCount(runtimeState, conversation.step)
+            conversation.collected_data.visit_date = visitDate
+            conversation.step = getForwardStep(currentStep, conversation.collected_data)
+            nextStep = conversation.step
+            decisionReason = 'visit_date_captured_success'
+            response = getPrompt(conversation.step, conversation.collected_data.language)
+            break
+        }
+
+        case ChatStep.ASK_VISIT_TIME: {
+            const stepTrace = traceFor(conversation.step)
+
+            if (isPickTimeIntent(rawTrimmed)) {
+                resetRetryCount(runtimeState, conversation.step)
+                nextStep = conversation.step
+                decisionReason = 'visit_time_manual_entry_requested'
+                response = getVisitTimeFormatPrompt(conversation.collected_data.language)
+                break
+            }
+
+            const visitTime = parseVisitTimeInput(rawTrimmed)
+            if (!visitTime) {
+                const retryCount = incrementRetryCount(runtimeState, conversation.step)
+                rejectedFields.push('visit_time')
+                logTrace(
+                    stepTrace,
+                    'validation_failed',
+                    'warn',
+                    { reason: 'invalid_visit_time', retryCount },
+                    'validation_failed_missing_visit_time',
+                )
+
+                if (isRepeatedInput(runtimeState, conversation.step, normalized) || retryCount >= 2) {
+                    fallbackTriggered = true
+                    incrementMetric('step_stuck_count')
+                    logTrace(stepTrace, 'repeated_input_detected', 'warn', { input: normalized, retryCount }, 'repeated_input_detected')
+                    logTrace(stepTrace, 'step_stuck', 'warn', { retryCount, currentStep: conversation.step }, 'fallback_triggered_retry_limit')
+                    conversation.step = ChatStep.DONE
+                    nextStep = conversation.step
+                    decisionReason = 'fallback_triggered_retry_limit'
+                    response = getPrompt(ChatStep.DONE, conversation.collected_data.language)
+                    break
+                }
+
+                decisionReason = 'validation_failed_missing_visit_time'
+                response = getPrompt(conversation.step, conversation.collected_data.language)
+                break
+            }
+
+            resetRetryCount(runtimeState, conversation.step)
+            conversation.collected_data.visit_time = visitTime
+            conversation.step = ChatStep.DONE
+            nextStep = conversation.step
+            decisionReason = 'visit_time_captured_success'
+            response = getPrompt(ChatStep.DONE, conversation.collected_data.language)
             break
         }
 

@@ -2,6 +2,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { LogContext, logEvent } from '@/lib/logger'
 
 export interface PropertyFilter {
+    intent?: string | null
     location?: string | null
     budget_min?: number | null
     budget_max?: number | null
@@ -23,6 +24,31 @@ export interface PropertyTraceContext extends LogContext {
 
 function hasBudgetConstraint(filters: PropertyFilter): boolean {
     return typeof filters.budget_min === 'number' || typeof filters.budget_max === 'number'
+}
+
+function normalizeIntent(intent: string | null | undefined): 'buy' | 'rent' | 'explore' | null {
+    const normalized = (intent ?? '').trim().toLowerCase()
+    if (normalized === 'buy' || normalized === 'rent' || normalized === 'explore') {
+        return normalized
+    }
+
+    return null
+}
+
+function applyIntentFilter<T>(query: T, intentInput: string | null | undefined): T {
+    const intent = normalizeIntent(intentInput)
+    if (intent !== 'rent') {
+        return query
+    }
+
+    const queryWithOr = query as T & { or?: (filters: string) => T }
+    if (typeof queryWithOr.or !== 'function') {
+        return query
+    }
+
+    return queryWithOr.or(
+        'status.ilike.%rent%,status.ilike.%lease%,status.ilike.%month%,title.ilike.%rent%,title.ilike.%lease%,description.ilike.%rent%,description.ilike.%lease%,description.ilike.%month%',
+    )
 }
 
 /**
@@ -49,7 +75,10 @@ function normalizeBhk(bhk: string | undefined): string | undefined {
  * Builds initial query with all applicable filters.
  */
 function buildInitialQuery(filters: PropertyFilter) {
-    let query = supabase.from('properties').select('id,title,location,price,bhk').eq('is_available', true)
+    let query = applyIntentFilter(
+        supabase.from('properties').select('id,title,location,price,bhk').eq('is_available', true),
+        filters.intent,
+    )
 
     if (isValidLocation(filters.location)) {
         query = query.ilike('location', `%${filters.location}%`)
@@ -80,7 +109,10 @@ function buildInitialQuery(filters: PropertyFilter) {
  * Retry 1: Remove bhk filter.
  */
 function buildRetry1Query(filters: PropertyFilter) {
-    let query = supabase.from('properties').select('id,title,location,price,bhk').eq('is_available', true)
+    let query = applyIntentFilter(
+        supabase.from('properties').select('id,title,location,price,bhk').eq('is_available', true),
+        filters.intent,
+    )
 
     if (isValidLocation(filters.location)) {
         query = query.ilike('location', `%${filters.location}%`)
@@ -105,7 +137,10 @@ function buildRetry1Query(filters: PropertyFilter) {
  * Retry 2: Remove price filters.
  */
 function buildRetry2Query(filters: PropertyFilter) {
-    let query = supabase.from('properties').select('id,title,location,price,bhk').eq('is_available', true)
+    let query = applyIntentFilter(
+        supabase.from('properties').select('id,title,location,price,bhk').eq('is_available', true),
+        filters.intent,
+    )
 
     if (isValidLocation(filters.location)) {
         query = query.ilike('location', `%${filters.location}%`)
@@ -121,8 +156,13 @@ function buildRetry2Query(filters: PropertyFilter) {
 /**
  * Retry 3: Return latest 5 available properties (minimal filtering).
  */
-function buildRetry3Query() {
-    return supabase.from('properties').select('id,title,location,price,bhk').eq('is_available', true).order('created_at', { ascending: false }).limit(5)
+function buildRetry3Query(filters: PropertyFilter) {
+    return applyIntentFilter(
+        supabase.from('properties').select('id,title,location,price,bhk').eq('is_available', true),
+        filters.intent,
+    )
+        .order('created_at', { ascending: false })
+        .limit(5)
 }
 
 /**
@@ -154,6 +194,7 @@ export async function getMatchingProperties(
                 data: {
                     stage: 'initial',
                     filters: {
+                        intent: filters.intent,
                         location: filters.location,
                         budget_min: filters.budget_min,
                         budget_max: filters.budget_max,
@@ -191,6 +232,7 @@ export async function getMatchingProperties(
                     maxResults: 5,
                     property_query_duration_ms: Date.now() - startedAt,
                     filters_applied: {
+                        intent: normalizeIntent(filters.intent) === 'rent',
                         location: isValidLocation(filters.location),
                         budget_min: typeof filters.budget_min === 'number',
                         budget_max: typeof filters.budget_max === 'number',
@@ -241,6 +283,7 @@ export async function getMatchingProperties(
                     count: retry1Properties.length,
                     property_query_duration_ms: Date.now() - startedAt,
                     filters_now_applied: {
+                        intent: normalizeIntent(filters.intent) === 'rent',
                         location: isValidLocation(filters.location),
                         budget_min: typeof filters.budget_min === 'number',
                         budget_max: typeof filters.budget_max === 'number',
@@ -316,6 +359,7 @@ export async function getMatchingProperties(
                     count: retry2Properties.length,
                     property_query_duration_ms: Date.now() - startedAt,
                     filters_now_applied: {
+                        intent: normalizeIntent(filters.intent) === 'rent',
                         location: isValidLocation(filters.location),
                         budget_min: false,
                         budget_max: false,
@@ -342,7 +386,7 @@ export async function getMatchingProperties(
             })
         }
 
-        const { data: data3, error: error3 } = await buildRetry3Query()
+        const { data: data3, error: error3 } = await buildRetry3Query(filters)
 
         if (error3) {
             throw new Error(`Retry 3 failed: ${error3.message}`)
@@ -366,6 +410,7 @@ export async function getMatchingProperties(
                     count: retry3Properties.length,
                     property_query_duration_ms: Date.now() - startedAt,
                     filters_now_applied: {
+                        intent: normalizeIntent(filters.intent) === 'rent',
                         location: false,
                         budget_min: false,
                         budget_max: false,

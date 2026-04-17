@@ -97,7 +97,7 @@ export default function ChatContainer() {
     }, [messages])
 
     const showFocusPanel = !hasUserStartedChat
-    const showQuickReplies = quickReplies.length > 0 && !isResultsMode
+    const showQuickReplies = quickReplies.length > 0 && latestStep !== ChatStep.SHOW_RESULTS
     const showQuickRepliesInFocus = showFocusPanel && showQuickReplies
     const showTranscript = hasMessages || loading || isSearching || !!error
 

@@ -39,10 +39,6 @@ export default function ChatWidget() {
         return latestSarahMessage?.id ?? null
     }, [messages])
 
-    const hasPropertyResults = useMemo(() => {
-        return messages.some((message) => !!message.properties && message.properties.length > 0)
-    }, [messages])
-
     const showResultsCta = useMemo(() => getShowResultsCta(preferredLanguage), [preferredLanguage])
     const showResultsActionOptions = useMemo(
         () => getShowResultsActionOptions(preferredLanguage),
@@ -188,7 +184,6 @@ export default function ChatWidget() {
                                     {quickReplies.length > 0
                                         && message.role === 'sarah'
                                         && message.id === latestSarahMessageId
-                                        && !hasPropertyResults
                                         && latestStep !== ChatStep.SHOW_RESULTS ? (
                                         <QuickReplyOptions
                                             options={quickReplies}

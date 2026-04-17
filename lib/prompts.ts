@@ -60,6 +60,16 @@ export const PROMPTS: StepPrompts = {
         te: 'ఏజెంట్ మిమ్మల్ని సంప్రదించడానికి మీ ఫోన్ నంబర్ ఇవ్వండి.',
         hi: 'कृपया अपना फोन नंबर साझा करें ताकि एजेंट आपसे संपर्क कर सके।',
     },
+    [ChatStep.ASK_VISIT_DATE]: {
+        en: 'What date would you like to schedule your site visit?',
+        te: 'మీ సైట్ విజిట్‌ను ఏ తేదీకి షెడ్యూల్ చేయాలనుకుంటున్నారు?',
+        hi: 'आप अपनी साइट विज़िट किस तारीख को शेड्यूल करना चाहेंगे?',
+    },
+    [ChatStep.ASK_VISIT_TIME]: {
+        en: 'What time works best for your site visit?',
+        te: 'మీ సైట్ విజిట్‌కు ఏ సమయం సరిపోతుంది?',
+        hi: 'आपकी साइट विज़िट के लिए कौन सा समय बेहतर रहेगा?',
+    },
     [ChatStep.ESCALATE]: {
         en: 'I will connect you with our human agent now.',
         te: 'ఇప్పుడు మిమ్మల్ని మా హ్యూమన్ ఏజెంట్‌తో కలుపుతాను.',
@@ -183,6 +193,26 @@ export function getLocalizedQuickReplies(step: ChatStep | null, language?: strin
             return ['तुरंत (Urgent)', 'जल्द (Soon)', 'लचीला (Flexible)']
         }
         return ['Urgent', 'Soon', 'Flexible']
+    }
+
+    if (step === ChatStep.ASK_VISIT_DATE) {
+        if (normalizedLanguage === 'te') {
+            return ['రేపు (Tomorrow)', '2 రోజుల్లో (In 2 Days)', 'ఈ వీకెండ్ (This Weekend)', 'తేదీ ఎంచుకోండి (Pick Date)']
+        }
+        if (normalizedLanguage === 'hi') {
+            return ['कल (Tomorrow)', '2 दिन में (In 2 Days)', 'इस वीकेंड (This Weekend)', 'तारीख चुनें (Pick Date)']
+        }
+        return ['Tomorrow', 'In 2 Days', 'This Weekend', 'Pick Date']
+    }
+
+    if (step === ChatStep.ASK_VISIT_TIME) {
+        if (normalizedLanguage === 'te') {
+            return ['ఉదయం 10:00 (Morning)', 'మధ్యాహ్నం 2:00 (Afternoon)', 'సాయంత్రం 6:00 (Evening)', 'సమయం ఎంచుకోండి (Pick Time)']
+        }
+        if (normalizedLanguage === 'hi') {
+            return ['सुबह 10:00 (Morning)', 'दोपहर 2:00 (Afternoon)', 'शाम 6:00 (Evening)', 'समय चुनें (Pick Time)']
+        }
+        return ['Morning (10:00 AM)', 'Afternoon (2:00 PM)', 'Evening (6:00 PM)', 'Pick Time']
     }
 
     if (step === ChatStep.ASK_NO_RESULTS_ACTION) {

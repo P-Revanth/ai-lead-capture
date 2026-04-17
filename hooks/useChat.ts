@@ -148,6 +148,60 @@ function getFallbackQuickRepliesForStep(step: ChatStep, language?: Language | nu
         ]
     }
 
+    if (step === ChatStep.ASK_VISIT_DATE) {
+        if (normalizedLanguage === 'te') {
+            return [
+                { label: 'రేపు', value: 'tomorrow' },
+                { label: '2 రోజుల్లో', value: 'in 2 days' },
+                { label: 'ఈ వీకెండ్', value: 'this weekend' },
+                { label: 'తేదీ ఎంచుకోండి', value: 'pick date' },
+            ]
+        }
+
+        if (normalizedLanguage === 'hi') {
+            return [
+                { label: 'कल', value: 'tomorrow' },
+                { label: '2 दिन में', value: 'in 2 days' },
+                { label: 'इस वीकेंड', value: 'this weekend' },
+                { label: 'तारीख चुनें', value: 'pick date' },
+            ]
+        }
+
+        return [
+            { label: 'Tomorrow', value: 'tomorrow' },
+            { label: 'In 2 Days', value: 'in 2 days' },
+            { label: 'This Weekend', value: 'this weekend' },
+            { label: 'Pick Date', value: 'pick date' },
+        ]
+    }
+
+    if (step === ChatStep.ASK_VISIT_TIME) {
+        if (normalizedLanguage === 'te') {
+            return [
+                { label: 'ఉదయం 10:00', value: 'morning' },
+                { label: 'మధ్యాహ్నం 2:00', value: 'afternoon' },
+                { label: 'సాయంత్రం 6:00', value: 'evening' },
+                { label: 'సమయం ఎంచుకోండి', value: 'pick time' },
+            ]
+        }
+
+        if (normalizedLanguage === 'hi') {
+            return [
+                { label: 'सुबह 10:00', value: 'morning' },
+                { label: 'दोपहर 2:00', value: 'afternoon' },
+                { label: 'शाम 6:00', value: 'evening' },
+                { label: 'समय चुनें', value: 'pick time' },
+            ]
+        }
+
+        return [
+            { label: 'Morning (10:00 AM)', value: 'morning' },
+            { label: 'Afternoon (2:00 PM)', value: 'afternoon' },
+            { label: 'Evening (6:00 PM)', value: 'evening' },
+            { label: 'Pick Time', value: 'pick time' },
+        ]
+    }
+
     if (step === ChatStep.ASK_NO_RESULTS_ACTION) {
         if (normalizedLanguage === 'te') {
             return [
@@ -440,7 +494,12 @@ export function useChat() {
     }, [fetchSuggestions, latestStep, sessionId, isSearching, loading, messages])
 
     const canShowQuickReplies = useMemo(() => {
-        return latestStep === ChatStep.ASK_INTENT || latestStep === ChatStep.ASK_TIMELINE
+        return (
+            latestStep === ChatStep.ASK_INTENT
+            || latestStep === ChatStep.ASK_TIMELINE
+            || latestStep === ChatStep.ASK_VISIT_DATE
+            || latestStep === ChatStep.ASK_VISIT_TIME
+        )
     }, [latestStep])
 
     return {

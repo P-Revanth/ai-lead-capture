@@ -1,5 +1,5 @@
 import { ChatStep, CollectedData, Language, PropertyType, QuickReplyOption } from '@/types/chat'
-import { BudgetRangeSuggestion, getBHKOptions, getBudgetRanges, getPropertyTypes, getTopLocations } from '@/lib/suggestionService'
+import { BudgetRangeSuggestion, getBHKOptionsByIntent, getBudgetRanges, getPropertyTypes, getTopLocationsByIntent } from '@/lib/suggestionService'
 import { normalizeLanguage } from '@/lib/prompts'
 
 const MAX_OPTIONS = 5
@@ -49,6 +49,18 @@ const TRANSLATIONS: Record<SupportedLanguage, {
         talkToAgent: string
         seeAvailableOptions: string
     }
+    visitDate: {
+        tomorrow: string
+        inTwoDays: string
+        thisWeekend: string
+        pickDate: string
+    }
+    visitTime: {
+        morning: string
+        afternoon: string
+        evening: string
+        pickTime: string
+    }
 }> = {
     en: {
         other: 'Other',
@@ -77,6 +89,18 @@ const TRANSLATIONS: Record<SupportedLanguage, {
         noResultsActions: {
             talkToAgent: 'Talk to the agent',
             seeAvailableOptions: 'See available options',
+        },
+        visitDate: {
+            tomorrow: 'Tomorrow',
+            inTwoDays: 'In 2 Days',
+            thisWeekend: 'This Weekend',
+            pickDate: 'Pick Date',
+        },
+        visitTime: {
+            morning: 'Morning (10:00 AM)',
+            afternoon: 'Afternoon (2:00 PM)',
+            evening: 'Evening (6:00 PM)',
+            pickTime: 'Pick Time',
         },
     },
     te: {
@@ -107,6 +131,18 @@ const TRANSLATIONS: Record<SupportedLanguage, {
             talkToAgent: 'ఏజెంట్‌తో మాట్లాడండి',
             seeAvailableOptions: 'అందుబాటులో ఉన్న ఎంపికలు చూడండి',
         },
+        visitDate: {
+            tomorrow: 'రేపు',
+            inTwoDays: '2 రోజుల్లో',
+            thisWeekend: 'ఈ వీకెండ్',
+            pickDate: 'తేదీ ఎంచుకోండి',
+        },
+        visitTime: {
+            morning: 'ఉదయం 10:00',
+            afternoon: 'మధ్యాహ్నం 2:00',
+            evening: 'సాయంత్రం 6:00',
+            pickTime: 'సమయం ఎంచుకోండి',
+        },
     },
     hi: {
         other: 'अन्य (Other)',
@@ -136,6 +172,18 @@ const TRANSLATIONS: Record<SupportedLanguage, {
             talkToAgent: 'एजेंट से बात करें',
             seeAvailableOptions: 'उपलब्ध विकल्प देखें',
         },
+        visitDate: {
+            tomorrow: 'कल',
+            inTwoDays: '2 दिन में',
+            thisWeekend: 'इस वीकेंड',
+            pickDate: 'तारीख चुनें',
+        },
+        visitTime: {
+            morning: 'सुबह 10:00',
+            afternoon: 'दोपहर 2:00',
+            evening: 'शाम 6:00',
+            pickTime: 'समय चुनें',
+        },
     },
 }
 
@@ -161,6 +209,10 @@ function dedupeByValue(options: QuickReplyOption[]): QuickReplyOption[] {
 }
 
 function formatBudget(value: number): string {
+    if (value < 100000) {
+        return `Rs ${new Intl.NumberFormat('en-IN').format(value)}`
+    }
+
     if (value >= 10000000) {
         const crore = value / 10000000
         const formatted = Number.isInteger(crore) ? crore.toFixed(0) : crore.toFixed(1)
@@ -178,12 +230,13 @@ function toBudgetInputValue(range: BudgetRangeSuggestion): string {
     }
 
     if (range.min === null && typeof range.max === 'number') {
-        const lowerBound = Math.max(100000, Math.floor(range.max * 0.25))
+        const lowerBound = Math.max(1000, Math.floor(range.max * 0.25))
         return `${lowerBound} to ${range.max}`
     }
 
     if (typeof range.min === 'number' && range.max === null) {
-        const upperBound = Math.round(range.min * 1.8)
+        const growthMultiplier = range.min < 100000 ? 2.5 : 1.8
+        const upperBound = Math.round(range.min * growthMultiplier)
         return `${range.min} to ${upperBound}`
     }
 
@@ -251,8 +304,8 @@ function getIntentOptions(language: SupportedLanguage): QuickReplyOption[] {
     ]
 }
 
-async function getLocationOptions(language: SupportedLanguage): Promise<QuickReplyOption[]> {
-    const dynamic = await getTopLocations(DYNAMIC_LIMIT)
+async function getLocationOptions(collectedData: CollectedData, language: SupportedLanguage): Promise<QuickReplyOption[]> {
+    const dynamic = await getTopLocationsByIntent(collectedData.intent, DYNAMIC_LIMIT)
     const options = dynamic.map((entry) => ({
         label: localizeLocationLabel(entry.label, entry.value, language),
         value: entry.value,
@@ -271,7 +324,7 @@ async function getBudgetOptions(collectedData: CollectedData, language: Supporte
         ? collectedData.location!.trim()
         : 'visakhapatnam'
 
-    const ranges = await getBudgetRanges(location, DYNAMIC_LIMIT)
+    const ranges = await getBudgetRanges(location, DYNAMIC_LIMIT, collectedData.intent)
     const options = ranges.map((range) => ({
         label: toBudgetLabel(range, language),
         value: toBudgetInputValue(range),
@@ -295,7 +348,7 @@ async function getPropertyTypeOptions(collectedData: CollectedData, language: Su
         max: collectedData.budget_max ?? null,
     }
 
-    const dynamic = await getPropertyTypes(location, budget, DYNAMIC_LIMIT)
+    const dynamic = await getPropertyTypes(location, budget, DYNAMIC_LIMIT, collectedData.intent)
     const options = dynamic.map((entry) => ({
         label: localizePropertyType(entry.value, language),
         value: entry.value,
@@ -319,7 +372,7 @@ async function getConfigOptions(collectedData: CollectedData, language: Supporte
         ? collectedData.location!.trim()
         : 'visakhapatnam'
 
-    const dynamic = await getBHKOptions(location, propertyType, DYNAMIC_LIMIT)
+    const dynamic = await getBHKOptionsByIntent(location, propertyType, DYNAMIC_LIMIT, collectedData.intent)
     const options = dynamic.map((entry) => ({
         label: entry.label,
         value: entry.value,
@@ -351,6 +404,26 @@ function getNoResultsActionOptions(language: SupportedLanguage): QuickReplyOptio
     ]
 }
 
+function getVisitDateOptions(language: SupportedLanguage): QuickReplyOption[] {
+    const copy = TRANSLATIONS[language].visitDate
+    return [
+        { label: copy.tomorrow, value: 'tomorrow' },
+        { label: copy.inTwoDays, value: 'in 2 days' },
+        { label: copy.thisWeekend, value: 'this weekend' },
+        { label: copy.pickDate, value: 'pick date' },
+    ]
+}
+
+function getVisitTimeOptions(language: SupportedLanguage): QuickReplyOption[] {
+    const copy = TRANSLATIONS[language].visitTime
+    return [
+        { label: copy.morning, value: 'morning' },
+        { label: copy.afternoon, value: 'afternoon' },
+        { label: copy.evening, value: 'evening' },
+        { label: copy.pickTime, value: 'pick time' },
+    ]
+}
+
 export async function getSuggestionOptionsForStep(
     step: ChatStep,
     collectedData: CollectedData,
@@ -364,7 +437,7 @@ export async function getSuggestionOptionsForStep(
         case ChatStep.ASK_INTENT:
             return getIntentOptions(normalizedLanguage)
         case ChatStep.ASK_LOCATION:
-            return getLocationOptions(normalizedLanguage)
+            return getLocationOptions(collectedData, normalizedLanguage)
         case ChatStep.ASK_BUDGET:
             return getBudgetOptions(collectedData, normalizedLanguage)
         case ChatStep.ASK_PROPERTY_TYPE:
@@ -373,6 +446,10 @@ export async function getSuggestionOptionsForStep(
             return getConfigOptions(collectedData, normalizedLanguage)
         case ChatStep.ASK_TIMELINE:
             return getTimelineOptions(normalizedLanguage)
+        case ChatStep.ASK_VISIT_DATE:
+            return getVisitDateOptions(normalizedLanguage)
+        case ChatStep.ASK_VISIT_TIME:
+            return getVisitTimeOptions(normalizedLanguage)
         case ChatStep.ASK_NO_RESULTS_ACTION:
             return getNoResultsActionOptions(normalizedLanguage)
         default:

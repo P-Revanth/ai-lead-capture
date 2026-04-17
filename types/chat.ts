@@ -10,6 +10,8 @@ export enum ChatStep {
     ASK_NO_RESULTS_ACTION = 'ask_no_results_action',
     CAPTURE_NAME = 'capture_name',
     CAPTURE_PHONE = 'capture_phone',
+    ASK_VISIT_DATE = 'ask_visit_date',
+    ASK_VISIT_TIME = 'ask_visit_time',
     ESCALATE = 'escalate',
     DONE = 'done',
 }
@@ -36,6 +38,8 @@ export interface CollectedData {
     timeline?: Timeline
     name?: string
     phone?: string
+    visit_date?: string
+    visit_time?: string
     status?: string
 }
 
